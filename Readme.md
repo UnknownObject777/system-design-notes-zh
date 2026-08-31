@@ -2,6 +2,8 @@
 # [System Design Interview - An Insider's Guide (Vol 1 and 2)](https://bytebytego.com/courses/system-design-interview)
 These notes are based on the System Design Interview books - [Vol 1 and Vol 2 2nd Ed](https://www.goodreads.com/book/show/54109255-system-design-interview-an-insider-s-guide) 
 
+📖 **简体中文版说明与完整目录见 [Readme.zh-CN.md](./Readme.zh-CN.md)**（Simplified Chinese translation of all chapter notes with full index)
+
 Check the notes here: https://pagefy.io/system-design/system-design-interview-by-alex-xu
 
 **Note:** These notes are a work in progress. 
