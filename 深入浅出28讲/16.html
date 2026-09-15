@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第16讲 · 附近商家：给地球画格子</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g4">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 16 讲 · 附近商家：给地球画格子</span>
+  <span><a href="15.html">← 上一讲 15</a>　<a href="17.html">下一讲 17 →</a></span>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 16 讲 / 共 28 讲 · 第四阶段「地理与数据」</div>
+  <h1>附近商家：给地球画格子</h1>
+  <div class="en">Proximity Service · 找到你身边的餐厅、酒店和加油站</div>
+  <p class="one"><b>一句话：</b>打开 App 一搜，5,000 米内的奶茶店立刻列出来——问题是地球是圆的、商家有两亿个，怎么做到毫秒级返回？</p>
+  <div class="stats">
+    <span class="stat">规模：1 亿日活 · 2 亿商家</span>
+    <span class="stat">搜索 QPS：约 5,000</span>
+    <span class="stat">默认半径：5,000 米</span>
+    <span class="stat">关键词：GeoHash · 四叉树 · Google S2</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">查字典</span>在一本 200 万页的字典里找一个字，没人会从第一页翻到最后一页。靠的是索引：先按拼音首字母翻到那一区，再在这一区里找到那一页，最后在这页里定位那个字。<b>附近搜索一模一样</b>：先把地球切成一个个小格子（索引），用户报出自己在哪个格子，系统只翻这个格子和隔壁几个格子，而不是把 2 亿商家挨个量一遍距离。</div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>这一讲要解决的是 Yelp、Google Maps 里那个熟悉的功能：<b>给定用户位置的纬度和经度，找出指定半径内的所有商家</b>（餐厅、酒店、加油站……），并按距离排好序返回。</p>
+  <p>功能需求三条：</p>
+  <ol class="clean">
+    <li><b>搜索</b>：根据用户位置（纬度、经度）和搜索半径查找商家。</li>
+    <li><b>商家管理</b>：允许商家所有者添加、更新、删除商家（不要求实时生效）。</li>
+    <li><b>详情</b>：按商家 ID 提供详细信息。</li>
+  </ol>
+  <p>非功能需求同样明确：<b>低延迟</b>（用户盯着地图等结果，慢了就关 App）、<b>数据隐私</b>（位置数据要符合 GDPR 和 CCPA 法规）、<b>高可用</b>（饭点高峰扛得住流量激增）。</p>
+  <p>规模假设与估算（原文数字）：</p>
+  <table class="num">
+    <tr><th>项目</th><th>假设</th></tr>
+    <tr><td>日活跃用户</td><td>1 亿（100M）</td></tr>
+    <tr><td>系统内商家总数</td><td>2 亿（200M）</td></tr>
+    <tr><td>人均搜索次数</td><td>每天 5 次</td></tr>
+    <tr><td>搜索 QPS</td><td>(100M × 5) / 86,400 ≈ 5,000 QPS</td></tr>
+    <tr><td>默认搜索半径</td><td>5,000 米</td></tr>
+  </table>
+  <p>难点不在"算距离"——那是初中数学。难点在于：<b>2 亿个商家，任何一个用户发起查询，都要立刻算出哪一批在圈内</b>。全表扫描 5,000 次/秒，数据库当场去世。所以这一讲的核心只有一种零件：<b>地理空间索引（Geospatial Index）</b>。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>先把 API 和数据流画出来，再谈索引。</p>
+  <p>核心搜索接口只有一个：</p>
+  <ul class="clean">
+    <li><code>GET /v1/search/nearby</code>，带三个参数：<code>latitude</code>（纬度）、<code>longitude</code>（经度）、<code>radius</code>（半径，默认 5,000 米）。</li>
+    <li>商家管理一套 CRUD：<code>GET /v1/businesses/{id}</code> 看详情，<code>POST /v1/businesses</code> 新增，<code>PUT</code> 更新，<code>DELETE</code> 删除。</li>
+  </ul>
+  <p>数据存两张表：商家表（business table，存详情）和地理空间索引表（geospatial index table，存"哪个商家在哪个格子"）。都是读多写少，关系型数据库（MySQL）加主从复制就够。</p>
+  <p>请求这样流转：</p>
+  <div class="flow">
+    <span class="node">用户（ lat / long / radius ）</span><span class="arrow">→</span>
+    <span class="node">负载均衡器</span><span class="arrow">→</span>
+    <span class="node">LBS 位置服务（只读 · 无状态）</span><span class="arrow">→</span>
+    <span class="node">地理空间索引</span><span class="arrow">→</span>
+    <span class="node">缓存 / 数据库集群</span>
+  </div>
+  <div class="flow">
+    <span class="node">商家所有者</span><span class="arrow">→</span>
+    <span class="node">负载均衡器</span><span class="arrow">→</span>
+    <span class="node">商家服务（增删改 + 详情）</span><span class="arrow">→</span>
+    <span class="node">数据库集群（主从复制）</span>
+  </div>
+  <p>为什么拆成两个服务？因为两者的负载形状完全不同。<b>LBS（Location-Based Service）</b>是纯读、无状态、QPS 极高且随时飙峰的服务——它必须能随便加机器，所以地理索引最好放在每台 LBS 自己的内存或就近缓存里。<b>商家服务</b>处理写和详情查询，流量平缓得多。负载均衡器把两类流量分开；数据库用主从复制扛读——LBS 读到的数据和主库刚写入的可能有一点差异，但没关系，<b>商家信息不是实时数据，晚几分钟天塌不下来</b>。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文选项顺序）</h2>
+
+  <h3><span class="no">1</span>选项 1：二维搜索——把地球当表格逐行扫描</h3>
+  <p>这解决什么问题：先建立一个最朴素的基准，看看不用索引有多惨。直觉做法：以用户为圆心画一个圆，找出圆内所有商家，SQL 写一个经纬度范围查询（两个 <code>BETWEEN</code>）。</p>
+  <p>问题有两个：<b>效率低下</b>——每次都要扫描整张商家表；<b>索引使不上劲</b>——数据库的普通索引只在一维上加速，经度和纬度各建一个索引略有改善，但依然非常慢。结论：得换个思路，把二维的位置信息压缩成一维的、数据库擅长处理的东西。</p>
+
+  <h3><span class="no">2</span>更好的方法：地理空间索引，把二维压成一维</h3>
+  <p>这解决什么问题：上一节失败的根源是"数据库索引只懂一维"。所以正路是<b>地理空间索引（Geospatial Indexing）</b>——用某种编码把 (纬度, 经度) 变成一维数据。两大类做法：</p>
+  <ul class="clean">
+    <li><b>哈希（Hash）</b>：均匀网格（Even Grid）、GeoHash。</li>
+    <li><b>树（Tree）</b>：四叉树（Quadtree）、Google S2、RTree。</li>
+  </ul>
+  <p>接下来三个选项，就是这条路上的三个代表。</p>
+
+  <h3><span class="no">3</span>选项 2：均匀网格——简单，但地球不按格子均匀长</h3>
+  <p>这解决什么问题：最直白的切法。把世界划成固定大小的网格，每个商家落进一个格子，查询时只翻用户所在格子及周围。实现简单，但它有个硬伤：<b>商家分布极不均匀</b>——市中心一个格子可能挤几万家，农村一个格子可能没有一家。格子太大，市中心查询返回一堆；格子太小，查询要翻几十上百个格子。均匀网格对不均匀的世界是错配的。</p>
+
+  <h3><span class="no">4</span>选项 3：GeoHash——给每个格子起名字</h3>
+  <p>这解决什么问题：既要格子化，又要格子大小可粗可细。GeoHash 的做法：沿本初子午线（prime meridian）和赤道（equator）把地球划成四个象限，每个象限再切成四个小格，<b>一层层细分下去</b>；编码时交替取经度、纬度的比特位，最终把经纬度编成一个字母数字字符串，共 12 个精度级别。</p>
+  <p>它有两个关键性质。<b>第一，前缀即位置</b>：两个 geohash 共享的前缀越长，位置越近——这正好匹配数据库字符串前缀匹配的能力。<b>第二，精度可选</b>：按"半径 ↔ geohash 长度"对照表选最短的前缀长度来覆盖搜索半径，比如 500 米对应长度 6。索引就是一张两列表：geohash → 商家 ID 列表，更新商家时改一行就行，非常轻。</p>
+  <p>但它有个著名的<b>边界问题（boundary issue）</b>：两个挨着的商家可能被格线切到两个 geohash 里，前缀完全不同（甚至分别位于赤道两侧）；反过来，共享长前缀的两个点也不一定真近。解法不复杂：<b>别只查用户所在格子，把相邻的 8 个格子一起查</b>，3×3 共 9 格，确保边界上的商家不漏。</p>
+
+  <h3><span class="no">5</span>选项 4：四叉树（Quadtree）——格子跟着商家密度长</h3>
+  <p>这解决什么问题：GeoHash 的格子大小是固定套路，而四叉树让<b>格子随密度自适应</b>。四叉树是一棵树：每个内部节点把空间切成四个象限，递归切下去，<b>直到每个节点里的商家数不超过 x 个</b>（原文取 100）。市中心格子被切得很小，农村格子可以大到覆盖整个县。</p>
+  <p>原文的实现细节：四叉树是<b>内存中的数据结构</b>，构建在每台 LBS 服务器上，服务器启动时建树。好消息是它不大——2 亿商家也就 GB 级内存，单机装得下；建树复杂度 O(n log n)，全量构建要几分钟。它天然适合 <b>k 最近邻（k-nearest）</b>查询，比如"找最近的加油站"。</p>
+  <p><b>运维考量</b>才是四叉树的真正代价：启动构建要几分钟，期间服务器不能接流量，所以新版本得<b>增量发布</b>到一部分服务器上；商家更新最简单的做法是<b>增量重建</b>，但这会导致大量缓存失效；想在线更新也行，但要自己实现锁机制，复杂得多。</p>
+
+  <h3><span class="no">6</span>选项 5：Google S2——把地球卷成一条曲线</h3>
+  <p>这解决什么问题：要更强的区域表达能力，尤其是不规则区域。Google S2 基于<b>希尔伯特曲线（Hilbert curve）</b>把球面映射成一维索引：曲线在空间上相近的两个点，在一维序列里也相近。地球被划分为一个个小单元（cell），多级层级可以覆盖任意形状的区域。</p>
+  <p>它最强的场景是<b>地理围栏（geofencing）</b>——给一块感兴趣的区域画界，用户进出触发通知。另一个优势：不需要固定精度级别，可以<b>指定最小、最大级别和最大单元数</b>，用变长编码逼近任意区域，这是 GeoHash 的定长格子做不到的。代价也直白：它是三者里最难实现的。</p>
+
+  <h3><span class="no">7</span>GeoHash vs 四叉树：原文的权衡对比</h3>
+  <p>这解决什么问题：到底选哪个？原文给了一张对照单。</p>
+  <table class="num">
+    <tr><th></th><th>GeoHash</th><th>四叉树（Quadtree）</th></tr>
+    <tr><td>实现难度</td><td>易用易实现，无需构建/重建树</td><td>稍难</td></tr>
+    <tr><td>查询形态</td><td>支持固定半径的结果</td><td>支持 k 最近邻商家查询</td></tr>
+    <tr><td>更新索引</td><td>很容易</td><td>更复杂，可能需重建整棵树</td></tr>
+    <tr><td>网格大小</td><td>固定，无法按人口密度调整</td><td>可按密度动态调整</td></tr>
+  </table>
+
+  <h3><span class="no">8</span>扩展数据库与地理空间索引</h3>
+  <p>这解决什么问题：2 亿商家，一张表一台库装不下怎么办。<b>商家表按商家 ID 分片（Sharding）</b>，每个商家一行，ID 散列天然均匀。地理空间索引表不一样：一张 geohash → 商家 ID 列表的表，数据量小得多，<b>没有分片的必要</b>，更好的做法是用只读副本（read-replica）分担读负载。</p>
+
+  <h3><span class="no">9</span>缓存策略：键别用坐标，用 geohash</h3>
+  <p>这解决什么问题：5,000 QPS 的搜索全打数据库还是扛不住，得上缓存。缓存键怎么选？最直觉的"用户位置坐标"有两个毛病：GPS 坐标本身不精确，几米就抖一次；用户还在走动，坐标一直在变，缓存全 miss。<b>更好的键是 geohash</b>——同一个格子内的所有用户共享一个键。两张缓存表：</p>
+  <table class="num">
+    <tr><th>缓存键</th><th>缓存值</th></tr>
+    <tr><td><code>geohash</code></td><td>该格子中的商家 ID 列表</td></tr>
+    <tr><td><code>business_id</code></td><td>商家详细信息（名称、地址、评论等）</td></tr>
+  </table>
+
+  <h3><span class="no">10</span>部署与最终架构：一次搜索的完整旅程</h3>
+  <p>这解决什么问题：把前面所有零件串成线上系统。部署上：LBS 和商家服务<b>部署在多个区域</b>；商家更新<b>每天批量处理</b>（本来就不要求实时）。最终请求链路如下——</p>
+  <ol class="clean">
+    <li><b>用户请求</b>：搜索 500 米内的餐厅，客户端把纬度 37.776720、经度 -122.416730、半径 500 米发给负载均衡器。</li>
+    <li><b>转发</b>：负载均衡器把请求转给 LBS。</li>
+    <li><b>算 geohash 长度</b>：LBS 查对照表——500 米对应 geohash 长度 6。</li>
+    <li><b>取相邻 geohash</b>：自己这格 + 相邻 8 格，得到 <code>[my_geohash, neighbor1, ..., neighbor8]</code> 共 9 个。</li>
+    <li><b>并行查 GeoHash Redis</b>：对每个 geohash 查一次，拿商家 ID 列表，<b>并行查询</b>压低延迟。</li>
+    <li><b>查商家信息 Redis 并排序</b>：按 ID 取完整详情，按与用户位置的距离排序，返回客户端。</li>
+  </ol>
+  <p>三个关键优化：<b>并行 Redis 调用</b>缩短响应时间，<b>GeoHash 索引</b>保证空间查询高效，<b>缓存</b>让商家数据几乎不走数据库。</p>
+
+  <h3><span class="no">11</span>选择最佳索引方法：一张总表</h3>
+  <p>这解决什么问题：面试收口的答案。</p>
+  <table class="num">
+    <tr><th>索引方法</th><th>优点</th><th>缺点</th></tr>
+    <tr><td><b>GeoHash</b></td><td>易于实现，适合附近位置搜索</td><td>边界问题，网格大小固定</td></tr>
+    <tr><td><b>四叉树</b></td><td>根据密度动态调整，支持 k 最近邻查询</td><td>更复杂，需要重新平衡树</td></tr>
+    <tr><td><b>Google S2</b></td><td>先进的地理围栏，用于 Google Maps</td><td>更难实现</td></tr>
+  </table>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li><b>GeoHash 的边界问题是致命的，绕不开</b>：前缀相近 ≠ 地理相近（可能隔着赤道），必须连相邻 8 格一起查——只查一格会漏掉贴着你但运气不好在格线另一侧的商家。</li>
+      <li><b>四叉树的更新是真坑</b>：增量重建会导致大量缓存失效；在线更新要自己造锁，复杂度陡增；启动建树几分钟，发布必须滚动。</li>
+      <li><b>缓存键用原始坐标等于没缓存</b>：GPS 抖动 + 用户移动，命中率惨不忍睹；键必须用 geohash。</li>
+      <li><b>网格大小固定 vs 按密度自适应</b>不可兼得：GeoHash 简单但格子死板，四叉树灵活但运维贵——按业务形态选，别贪全。</li>
+      <li>主从复制有读延迟，这一讲却"不算问题"——<b>因为商家信息非实时</b>；换一个实时性要求高的场景，这笔账就要重算。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>附近搜索 = <b>空间索引问题</b>：先定位到格子，再在小范围内算距离；直接全表扫描是死路。</li>
+      <li>GeoHash 用<b>前缀即位置</b>把二维压成一维，代价是边界问题——查自己 + 相邻 8 格。</li>
+      <li>缓存键用 geohash、不用坐标；5,000 QPS 的读流量靠 Redis + 只读副本扛，数据库只做后盾。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../16.%20Proximity%20Service/Readme.zh-CN.md">16. Proximity Service/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="15.html"><span>上一讲</span>15 · 网盘：切块、去重、同步</a>
+  <a class="next" href="17.html"><span>下一讲</span>17 · 附近好友：叮，朋友在你身边 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

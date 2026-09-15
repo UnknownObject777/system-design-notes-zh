@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第21讲 · 广告点击计数：流水线点钞票</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g4">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 21 讲 · 广告点击计数：流水线点钞票</span>
+  <span><a href="20.html">← 20</a>&nbsp;&nbsp;<a href="22.html">下一讲 22 →</a></span>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 21 讲 / 共 28 讲 · 第四阶段「地理与数据」</div>
+  <h1>广告点击计数：流水线点钞票</h1>
+  <div class="en">Ad Click Event Aggregation</div>
+  <p class="one"><b>一句话：</b>每秒几万次点击，几分钟内算出每个广告被点了多少次——这是广告主付钱的依据，一张不能漏，一张不能多数。</p>
+  <div class="stats">
+    <span class="stat">点击：10 亿次/天 · QPS 1 万，峰值 5 万</span>
+    <span class="stat">广告规模：200 万个</span>
+    <span class="stat">新增存储：100 GB/天（3 TB/月）</span>
+    <span class="stat">端到端延迟：几分钟</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">点钞流水线</span>银行金库每天要清点海量的钞票：传送带不停（点击事件流），点钞机逐张清点并按面值分把（聚合节点按广告计数），捆扎员把各台机器的数字汇总入账（归约节点），账房先生晚上拿总账对着原始录像逐笔核对（对账）。规矩有三：一张不能漏（漏了少收钱）、一张不能多数（重复了多收钱）、机器坏了换一台接着上次的数继续点（容错）。<b>广告点击聚合，就是一条不许数错钱的流水线。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>Facebook、YouTube、TikTok 背后是一个庞大的数字广告产业，其中有一环叫<b>实时竞价（Real-Time Bidding，RTB）</b>：广告位在一秒内被买卖。RTB 有两个硬要求：速度（通常一秒内完成）和<b>准确</b>——因为点击数直接决定广告主付多少钱。</p>
+  <p>所以这一讲的问题是：<b>点击事件像洪水一样涌进来，怎样在几分钟内算出"每个广告被点了多少次"，而且算得准？</b></p>
+  <p>核心查询需求：</p>
+  <ol class="clean">
+    <li>返回广告 X 在过去 Y 分钟内的点击次数；</li>
+    <li>返回过去 1 分钟内被点击最多的前 100 个广告，参数可配置，聚合每分钟执行一次；</li>
+    <li>支持按 <code>ip</code>、<code>user_id</code>、<code>country</code> 过滤。</li>
+  </ol>
+  <p>边界情况也要提前摆上台面：<b>事件可能迟到、可能重复、系统某部分可能故障</b>——都要能恢复。延迟上，点击聚合端到端几分钟即可接受（数据用于计费和报告），但 RTB 本身要求小于一秒。</p>
+  <p>规模估算（Facebook / Google 级别）：</p>
+  <table class="num">
+    <tr><th>指标</th><th>数值</th><th>说明</th></tr>
+    <tr><td>DAU</td><td>10 亿</td><td>假设每个用户每天点 1 个广告</td></tr>
+    <tr><td>每日点击事件</td><td>10 亿次</td><td>事件总量，年同比增长 30%</td></tr>
+    <tr><td>广告总数</td><td>200 万个</td><td>需要被聚合的对象</td></tr>
+    <tr><td>点击 QPS / 峰值</td><td>10,000 / 50,000</td><td>峰值按平均值的 5 倍算</td></tr>
+    <tr><td>单次点击存储</td><td>0.1 KB</td><td>ad_id、时间戳、user、ip、country</td></tr>
+    <tr><td>每日 / 每月新增存储</td><td>100 GB / 3 TB</td><td>只存原始事件就这么大</td></tr>
+  </table>
+  <p>非功能需求由此定型：<b>正确性第一</b>（计费依据）、妥善处理迟到和重复事件、对部分故障有弹性、端到端延迟最多几分钟。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>点击数据在输入和输出上都是<b>无界数据流</b>（unbounded stream）——它不会停。先给客户端（数据科学家、分析师、广告主）两个查询接口：</p>
+  <ul class="clean">
+    <li><code>GET /v1/ads/{:ad_id}/aggregated_count</code>：参数 <code>from</code> / <code>to</code>（起止分钟）/ <code>filter</code>（过滤策略标识，如 001 表示"非美国地区的点击"），返回这段时间的聚合计数。</li>
+    <li><code>GET /v1/ads/popular_ads</code>：参数 <code>count</code>（前 N 个）/ <code>window</code>（窗口分钟数）/ <code>filter</code>，返回点击最多的广告 ID 列表。</li>
+  </ul>
+  <p>数据模型分两层。<b>原始数据</b>是逐条事件（ad_id、时间戳、user、ip、country），好处是数据集完整、可过滤、可重算；坏处是太大、查询太慢。<b>聚合数据</b>是每分钟每桶一行（ad_id、click_minute、filter_id、count），小、快，但它是派生数据，有信息丢失。结论：<b>两者都要</b>——原始数据扔进冷存储（出 bug 时调试用、可回填），聚合数据存进数据库供查询。数据库选 Cassandra：原始数据侧平均 QPS 1 万、峰值 5 万，是写密集型工作负载，Cassandra 对高写入有原生支持。</p>
+  <p>高层架构，数据这样流动：</p>
+  <div class="flow">
+    <span class="node">用户点击</span><span class="arrow">→</span>
+    <span class="node">广告服务</span><span class="arrow">→</span>
+    <span class="node">Kafka 队列 1<br>原始点击事件</span><span class="arrow">→</span>
+    <span class="node">Map 映射节点</span><span class="arrow">→</span>
+    <span class="node">Aggregate 聚合节点</span><span class="arrow">→</span>
+    <span class="node">Reduce 归约节点</span><span class="arrow">→</span>
+    <span class="node">Kafka 队列 2<br>聚合结果</span><span class="arrow">→</span>
+    <span class="node">Cassandra 聚合库</span><span class="arrow">→</span>
+    <span class="node">查询 API → 仪表盘</span>
+  </div>
+  <p>为什么中间要隔两个消息队列？如果用同步接收端，一个消费者崩溃就可能让整个系统停滞；换成 Kafka 异步处理，生产者和消费者彻底解耦。<b>第二个队列的存在是为了端到端精确一次（exactly-once）的原子提交</b>——聚合结果和"消费到哪了"一起落地，不丢不重。</p>
+  <p>中间的聚合服务用 <b>MapReduce 框架</b>，画成一张 DAG（有向无环图）：每个节点只做一件事，把结果发给下游。<b>映射节点（map node）</b>从数据源读数据、过滤、转换，按 <code>ad_id</code> 把事件分配到不同聚合节点；<b>聚合节点（aggregate node）</b>每分钟在内存里按广告计数；<b>归约节点（reduce node）</b>把各聚合节点的结果收拢成最终结果。它把大数据转成常规大小的数据——每秒几万条事件，压成每分钟每广告一个数字。</p>
+  <p>三个用例这样落地：用例一，广告按 <code>ad_id % 3</code> 分区，各聚合节点各数各的；用例二，每个节点维护一个<b>堆（heap）</b>数据结构，快速取出前 N 个；用例三，过滤用<b>星型模式（star schema）</b>——预定义过滤标准（维度 dimensions，如国家）提前预聚合好，查的时候直接读，不用临时扫原始数据。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文步骤 3 各小节的顺序）</h2>
+
+  <h3><span class="no">1</span>流处理 vs. 批处理：选哪条数据处理路径</h3>
+  <p>系统有三类：在线服务（响应客户端，指标是可用性和延迟）、批处理系统（离线，吃有界的大数据，指标是吞吐量，代表是 MapReduce）、流处理系统（近实时，吃无界流，吞吐和延迟都要，代表是 Flink）。</p>
+  <p>我们的设计是<b>混合</b>的：数据到达时用流处理近实时出聚合结果；历史数据备份用批处理。如果批、流两条路径都保留，叫 <b>Lambda 架构</b>——缺点是要维护两条路径、两套代码库。替代方案 <b>Kappa 架构</b>：只用单一的流处理引擎。本设计选 Kappa，因为<b>重算也走同一条聚合服务</b>。当聚合逻辑出了大 bug 需要重算：重新计算服务从原始存储捞数据（批处理作业）→ 发到一台专门的聚合服务，避免影响实时流量 → 结果写入第二个消息队列，再更新聚合数据库。</p>
+
+  <h3><span class="no">2</span>时间：事件时间还是处理时间</h3>
+  <p>聚合需要一个时间戳，它有两个产生点：<b>事件时间（event time）</b>是点击发生的时间，<b>处理时间（processing time）</b>是服务器处理时的时间。中间隔着消息队列和网络延迟，两者可能差很多。权衡很直白：</p>
+  <ul class="clean">
+    <li><b>事件时间</b>：聚合更准确；但客户端的时钟可能不准，时间戳甚至可能是恶意伪造的。</li>
+    <li><b>处理时间</b>：服务器时间戳可靠；但事件迟到时，它就被归错了窗口。</li>
+  </ul>
+  <p>计费场景准确性优先，选<b>事件时间</b>，然后解决迟到问题：给聚合窗口<b>故意多留一段"水印"（watermark）</b>——窗口多等一会儿再关闭。水印短，遗漏迟到事件的概率大但延迟低；水印长，遗漏少但延迟高。注意：无论水印多长，遗漏的可能性始终在。为这种低概率事件继续优化没有意义，正确的兜底是<b>一天结束时做对账（reconciliation）</b>。</p>
+
+  <h3><span class="no">3</span>聚合窗口：四种切时间的方式</h3>
+  <p>窗口函数有四种：<b>翻转（固定）窗口（tumbling window）</b>——每分钟一个格子，互不重叠；<b>跳跃窗口（hopping window）</b>——格子固定但会重叠跳；<b>滑动窗口（sliding window）</b>——随当前时间滑动；<b>会话窗口（session window）</b>——按用户行为间隙切段。本设计：广告点击计数用<b>翻转窗口</b>（"第 N 分钟的点击数"）；Top-N 查询用<b>滑动窗口</b>（"过去 M 分钟内点击最多的"）。</p>
+
+  <h3><span class="no">4</span>投递保证：一张都不能丢、不能重</h3>
+  <p>投递保证有三档：<b>最多一次（at-most-once）</b>可能丢；<b>至少一次（at-least-once）</b>可能重复；<b>精确一次（exactly-once）</b>不丢不重。大多数系统"至少一次"就够用——重复一点点没关系。但本系统不行：<b>很小的百分比差异就是数百万美元的出入</b>。所以必须用精确一次。</p>
+
+  <h3><span class="no">5</span>数据去重：重复从哪来，怎么灭</h3>
+  <p>最常见的数据质量问题是重复，来源有两个。<b>客户端</b>：可能重发同一个事件，恶意的重复交给风险引擎（risk engine）处理。<b>服务器故障</b>：聚合节点宕机，上游没收到确认，事件被重发——典型例子是偏移量 100 被处理并发送后确认丢失，于是 100 被再处理一次、再发一次。</p>
+  <p>解法的演进：把上次见到的偏移量存进 HDFS/S3？有隐患——如果存储偏移量之后结果还没发到下游，偏移量却已经记下，那批结果<b>永远到不了下游</b>。稳妥做法是<b>存偏移量 + 与下游交互，做成原子的</b>，这需要实现一个分布式事务。原文作者补了一招：如果下游系统以<b>幂等（idempotent）</b>方式处理聚合结果，就不需要分布式事务了。</p>
+
+  <h3><span class="no">6</span>系统的扩展：三个零件各自长大</h3>
+  <p>消息队列、聚合服务、数据库三者解耦，可以<b>独立扩展</b>。</p>
+  <ul class="clean">
+    <li><b>扩展消息队列</b>：生产者不加限制，随便扩；消费者靠消费者组（consumer group）加人扩，但要<b>预先创建足够的分区</b>；数千个消费者时，再平衡（rebalancing）可能耗时很长，挑非高峰做；还可以按地理位置拆主题，如 <code>topic_na</code>、<code>topic_eu</code>。</li>
+    <li><b>扩展聚合服务</b>：加节点就能扩映射-归约节点；单节点内用<b>多线程</b>提吞吐，或用 Apache YARN 之类的资源提供者上<b>多进程</b>。选项一更容易，选项二在实践中更常用、更可扩展。</li>
+    <li><b>扩展数据库</b>：Cassandra 原生支持用<b>一致性哈希（consistent hashing）</b>水平扩展——加一个新节点，数据自动在所有虚拟节点间重新平衡，不需要手动分片。</li>
+  </ul>
+  <p>还有热点问题：某个广告特别火，点击全涌向一个聚合节点怎么办？资源管理器给它<b>追加资源</b>——原节点把事件拆成 3 组，每个聚合节点处理 100 个，结果写回原节点，原节点就不至于过载。更复杂的高级打法还有全局-局部聚合（Global-Local Aggregation）和拆分去重聚合（Split Distinct Aggregation）。</p>
+
+  <h3><span class="no">7</span>容错：机器会坏，数不能丢</h3>
+  <p>聚合节点在<b>内存</b>里处理数据——节点一宕机，已处理的数据就没了。第一道防线是 Kafka 的<b>消费者偏移量（consumer offset）</b>：新节点接手后从上次中断的地方继续。但 Top-N 聚合还有额外的中间状态要保。办法是给正在进行的聚合<b>每分钟打快照（snapshot）</b>。节点宕机后，新节点读取最新已提交的偏移量 + 最新快照，接着把作业跑完。</p>
+
+  <h3><span class="no">8</span>数据监控与正确性：给数钱的人配个监工</h3>
+  <p>聚合数据用于计费，必须上严格的监控。三个指标：<b>延迟（Latency）</b>——跟踪不同事件的时间戳，看端到端延迟；<b>消息队列大小</b>——队列突然变长说明要加聚合节点，而 Kafka 是分布式提交日志，没有"队列大小"，要看 <code>records-lag</code> 指标；<b>聚合节点的系统资源</b>——CPU、磁盘、JVM。</p>
+  <p>外加一道日终保险：<b>对账（reconciliation）</b>流程是个批处理作业，每天结束时跑——根据原始数据重新计算聚合结果，和聚合数据库里存的实际数据比对。对不上，就说明流水线某处出了问题。</p>
+
+  <h3><span class="no">9</span>替代设计：面试里的另一种答法</h3>
+  <p>泛化的系统设计面试不要求你懂大数据软件的内部原理——讲清思维过程和权衡，比背工具名字更重要。一条现成的替代路线：点击数据存 <b>Hive</b>，上面加一层 <b>ElasticSearch</b> 加速查询；聚合直接在 OLAP 数据库里做，比如 <b>ClickHouse</b> 或 <b>Druid</b>。能用成熟的轮子，就别什么都自己造。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>事件时间和处理时间<b>没有完美解</b>：客户端时钟可能错、可能被伪造；服务器时间对迟到事件又不准。选事件时间，就要一辈子跟迟到事件作斗争。</li>
+      <li>水印是"多等一会儿"的艺术：短了漏数，长了拖延迟；而且<b>无论多长都不能保证零遗漏</b>，最终只能靠日终对账兜底。</li>
+      <li>精确一次很贵：要么实现分布式事务，要么全链路做幂等——天下没有免费的"不丢不重"。</li>
+      <li>星型模式查得快，但过滤维度一多，<b>桶和记录数会爆炸</b>。</li>
+      <li>Lambda 架构要养两条处理路径、两套代码库；Kappa 架构省了一套，但重算时必须给实时流量让路（专门的聚合服务）。</li>
+      <li>数千消费者的再平衡很慢，要在非高峰做；超级热门的广告会打爆单个聚合节点，热点处理是绕不开的特殊情况。</li>
+      <li>存偏移量和存结果如果分两步，中间崩了就是新的不一致——"原子"二字值千金。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>这是<b>计费系统</b>：准确性压倒一切，所以 exactly-once + 去重 + 日终对账三件套一个不能少。</li>
+      <li>Kafka 队列负责缓冲解耦，MapReduce DAG（映射 → 聚合 → 归约）负责把无限的事件流压成每分钟的小数字。</li>
+      <li>队列、聚合服务、数据库<b>解耦后各自独立扩展</b>；热点广告单独加餐，监控盯 <code>records-lag</code>。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../21.%20Ad%20Click%20Event%20Aggregation/Readme.zh-CN.md">21. Ad Click Event Aggregation/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="20.html"><span>上一讲</span>20 · 指标监控与告警系统 ←</a>
+  <a class="next" href="22.html"><span>下一讲</span>22 · 酒店预订系统 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

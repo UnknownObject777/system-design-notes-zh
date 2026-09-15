@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第7讲 · 唯一 ID：不发重的学号</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g2">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 7 讲 · 唯一 ID：不发重的学号</span>
+  <a href="06.html">← 上一讲 06</a>
+  <a href="08.html">下一讲 08 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 7 讲 / 共 28 讲 · 第二阶段「造零件」</div>
+  <h1>唯一 ID：不发重的学号</h1>
+  <div class="en">Unique ID Generator</div>
+  <p class="one"><b>一句话：</b>几万台机器同时发号，全宇宙唯一，还能按时间排大小。每条 tweet、每个订单都要一个这样的 ID，这一讲就是造发号器。</p>
+  <div class="stats">
+    <span class="stat">硬指标：64 位数字 ID</span>
+    <span class="stat">吞吐：10,000+ ID/秒</span>
+    <span class="stat">方案：Twitter Snowflake</span>
+    <span class="stat">分段：41 + 5 + 5 + 12 位</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">学号</span>一个大学城几万人同时报到，每人进门就要立刻领一个<b>全校唯一</b>的学号，学号还要能看出谁先报到谁后报到。让教务处开一张总单子挨个填，队伍能从南门排到北门（集中发号，又慢又单点）。Snowflake 的做法是把学号切成几段：<b>年份 + 校区 + 报到处 + 流水号</b>。每个报到处自己填自己的流水号，互不商量，流水号从 1 往上数——校区不同、窗口不同，号永远撞不上；年份在前，号天然按时间排好序。<b>唯一和有序，都是靠"分段"换来的，不是靠排队。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>单机时代这事好办：数据库一条 <code>auto_increment</code> 搞定，因为只有一个"发号窗口"。可到了分布式环境，机器是几百上千台，每台都想自己发号，自增键立刻撞上两堵墙：<b>扩展性</b>（加一台机器怎么错开已有的号？）和<b>同步</b>（跨数据中心怎么对表？）。</p>
+  <p>所以这一讲要造的发号器，得同时满足下面几条：</p>
+  <table class="num">
+    <tr><th>需求</th><th>原文的硬指标</th></tr>
+    <tr><td>唯一</td><td>任何机器、任何时刻发出去的号不能重复</td></tr>
+    <tr><td>形态</td><td>必须是数字，且塞得进 <b>64 位</b></td></tr>
+    <tr><td>有序</td><td>按日期可排序，随时间递增（但不要求严格 +1）</td></tr>
+    <tr><td>吞吐</td><td>每秒生成 <b>超过 10,000 个 ID</b></td></tr>
+  </table>
+  <p>"不严格 +1"这条很值得琢磨：它放开了"号码必须连续"的执念——只要晚发的号比早发的大，中间跳号完全没关系。这个松弛条件，正是后面 Snowflake 方案能成立的地基。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>原文先把候选路线摆上桌，再逐条过堂。数据（发号请求）的流向取决于走哪条路：</p>
+  <div class="flow">
+    <span class="node">应用：要一个新 ID</span><span class="arrow">→</span>
+    <span class="node minor">路线 A：多主库轮流发（有中央协调）</span><span class="arrow">/</span>
+    <span class="node minor">路线 B：票据服务器集中发（有中央协调）</span><span class="arrow">/</span>
+    <span class="node">路线 C：Snowflake，每台机器本地发号</span><span class="arrow">→</span>
+    <span class="node">拼五段：时间戳 · 机房 · 机器 · 序列号</span><span class="arrow">→</span>
+    <span class="node">64 位 ID</span>
+  </div>
+  <p>前两条路的共同点是<b>存在中央协调者</b>：要么几台数据库约定步长轮流发，要么一台专职发号服务器挨个派。协调者一存在，"加机器"和"挂一台"立刻变成全局难题。Snowflake 的思路是把发号权下放到每台 Web 服务器手里：各发各的，机器之间零协商，唯一靠号段错位来保证，时钟靠 NTP 来对表。哪条路走得通，第三步逐条验证。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文候选方案 1–4 的顺序）</h2>
+
+  <h3><span class="no">1</span>多主复制（Multi-Master Replication）：还是想让数据库自增</h3>
+  <p>解决什么问题：团队最顺手的方案仍是数据库自增，能不能改改用下去？做法：开 <code>k</code> 台数据库做主，每台都用 <code>auto_increment</code>，但把步长（step）调成 <code>k</code>——第 1 台发 1、1+k、1+2k……，第 2 台从 2 起步，第 3 台从 3 起步。每台错开一格，号不撞。</p>
+  <p>坑也写在原文里：<b>难跨数据中心扩展</b>；ID 不总随时间递增——同一时刻三台库各发各的，后发请求的号可能比先发的还小，排序性没了；加机器、减机器要重排所有人的步长，动静很大。</p>
+
+  <h3><span class="no">2</span>UUID（通用唯一标识符）：彻底不要协调</h3>
+  <p>解决什么问题：既然协调麻烦，干脆取消协调——每台服务器独立生成 <b>128 位</b>全局唯一标识符，机器之间互不通信。优点很硬：<b>无需协调、随 Web 服务器轻松扩展</b>。</p>
+  <p>但对不上我们的需求单：128 位直接超出 64 位红线（存储翻倍、索引变大）；更致命的是 <b>ID 无法按时间排序</b>，连"是不是数字"都保证不了。需要一个"按日期可排序"的系统，UUID 直接出局。</p>
+
+  <h3><span class="no">3</span>票据服务器（Ticket Server）：一台专职取号机</h3>
+  <p>解决什么问题：就要数字 ID，就要简单。做法：一台集中式数据库服务器专职发号，来一个请求就递增一位、发一个号，像银行老式的取号机。小系统里它确实简单可靠，出的也确实是数字 ID。</p>
+  <p>死穴是<b>单点故障</b>：取号机一挂，全系统都领不到号，业务停摆。而且在多服务器环境里同步本身就是难点。它赢在简单，输在命悬一线。</p>
+
+  <h3><span class="no">4</span>Twitter Snowflake：把号切成五段</h3>
+  <p>解决什么问题：前三种要么有中央协调，要么超宽无序。Snowflake 的回答是把 64 位 ID 切成五段，每段只负责一件事：</p>
+  <table class="num">
+    <tr><th>段</th><th>位数</th><th>干什么</th></tr>
+    <tr><td>符号位</td><td>1</td><td>恒为 0，可用于区分有符号数和无符号数</td></tr>
+    <tr><td>时间戳</td><td>41</td><td>自定义纪元（epoch）起的毫秒数。Twitter 默认纪元是 1288834974657，对应 UTC 2010 年 11 月 4 日 01:42:54。这一段保证 ID 按时间有序</td></tr>
+    <tr><td>数据中心 ID</td><td>5</td><td>最多标识 2^5 = <b>32</b> 个数据中心</td></tr>
+    <tr><td>机器 ID</td><td>5</td><td>每个数据中心内最多 <b>32</b> 台机器</td></tr>
+    <tr><td>序列号</td><td>12</td><td>同一毫秒、同一台机器内自增，每毫秒最多 2^12 = <b>4096</b> 个 ID；毫秒一过就归零</td></tr>
+  </table>
+  <p>发号流程完全是本地的：看一眼当前毫秒 → 填进时间戳段 → 填上本机的机房号和机器号 → 序列号自增一格；同一毫秒内第 4097 个请求就只好等下一毫秒。机器之间<b>零协调</b>，为什么不撞号？因为任意两台机器要么时间戳不同，要么机房号/机器号不同，要么序列号不同——三个"不同"必居其一。原文给它三条优点：<b>可扩展</b>（多服务器上每秒处理 10,000+ 个 ID）、<b>时间有序</b>、<b>去中心化</b>（无单点故障）。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>整个方案建立在一个隐含假设上：<b>各服务器的时钟是同步的</b>。时钟一旦漂移甚至回拨（NTP 纠偏、虚拟机休眠都会触发），时间戳段会"往回走"，可能发出比旧 ID 还小的号。原文的对策是用<b>网络时间协议（NTP）</b>把时钟漂移压到最小——但"最小"不是"零"，回拨防护要自己补。</li>
+      <li>五段长度是<b>此消彼长</b>的零和：序列号让位给时间戳，单机吞吐上限就降；机器位加多，时间戳位就短，纪元的可用年限跟着缩短。必须按场景调（原文叫"段长度调整"）。</li>
+      <li>发号器是咽喉要道，挂了下游全瘫，所以<b>高可用不是可选项</b>：要有冗余和故障转移机制。</li>
+      <li>回头再看三条落选路线，死穴各不相同：多主加减机器要重排步长、ID 还不保序；票据服务器是单点；UUID 超宽且完全无序。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>唯一性来自<b>分段</b>：时间、地点、序号各占一段，机器之间零协调也不撞号。</li>
+      <li>时间有序靠时间戳段，水平扩展靠机器本地发号——两头都想要，就别选中央协调。</li>
+      <li>时钟是命门：NTP 校时、段长按场景调、发号器做冗余，三件事一件不能省。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../07.%20Unique-Id%20Generator/Readme.zh-CN.md">07. Unique-Id Generator/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="06.html"><span>上一讲</span>← 06</a>
+  <a class="next" href="08.html"><span>下一讲</span>08 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

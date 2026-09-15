@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第14讲 · YouTube：视频的搬运与变身</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g3">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 14 讲 · YouTube：视频的搬运与变身</span>
+  <span><a href="13.html">← 上一讲 13</a> <a href="15.html">下一讲 15 →</a></span>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 14 讲 / 共 28 讲 · 第三阶段「搭系统」</div>
+  <h1>YouTube：视频的搬运与变身</h1>
+  <div class="en">Design Youtube · 视频上传、转码与流媒体分发</div>
+  <p class="one"><b>一句话：</b>几亿人上传和看视频，关键是两件事——转码流水线把原始视频"变身"成各种规格，再精打细算省下 CDN 的钱。</p>
+  <div class="stats">
+    <span class="stat">20 亿月活跃用户（2020）</span>
+    <span class="stat">每天观看 50 亿个视频</span>
+    <span class="stat">假设：DAU 500 万 · 日存 150 TB</span>
+    <span class="stat">CDN 成本：$150,000 / 天</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">快递总仓</span>你开了一家全国性的大卖场。卖家把货寄到<b>总仓</b>，总仓把每件货重新打包成各种规格——小袋装、家庭装、礼盒装（这就是<b>转码</b>），再按销量分发：爆款铺进全国各地的<b>分仓</b>，买家就近取货，又快又省运费；冷门货留在总仓，谁下单谁发货。视频网站的玩法一模一样：<b>上传是收货，转码是重新打包，CDN 是分仓，运费就是带宽账单。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>这一讲要造的不是"能放视频的网站"，而是一个能同时伺候<b>上传</b>和<b>观看</b>两头的巨型系统。设计目标有五条：上传速度快、播放流畅、能切画质、基础设施成本低、高可用高可靠。</p>
+  <p>先看它有多大（2020 年的数据）：20 亿月活跃用户，每天观看 50 亿个视频，37% 的移动互联网流量来自 YouTube，支持 80 种语言，2019 年广告收入 151 亿美元。规模一上来，最贵的东西立刻显形：<b>带宽</b>。</p>
+  <p>再做一组估算假设，把成本算出来：</p>
+  <table class="num">
+    <tr><th>假设</th><th>数值</th><th>说明</th></tr>
+    <tr><td>日活跃用户（DAU）</td><td>500 万</td><td>系统设计的估算基准</td></tr>
+    <tr><td>平均视频大小</td><td>300 MB</td><td>—</td></tr>
+    <tr><td>单个视频上传上限</td><td>1 GB</td><td>—</td></tr>
+    <tr><td>每日新增存储</td><td>150 TB</td><td>原始视频进 Blob 存储</td></tr>
+    <tr><td>CDN 成本估算</td><td>$150,000 / 天</td><td>500 万 × 5 个视频 × 0.3 GB × $0.02（按 Amazon CloudFront 计价）</td></tr>
+  </table>
+  <p>最后一行是全场最刺眼的数字：<b>一天 15 万美金的 CDN 账单</b>。所以这一讲的一半篇幅，其实都在回答"怎么把这笔钱省下来"。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>对照原文的高层架构图，七个组件各司其职：</p>
+  <div class="flow">
+    <span class="node">客户端（手机 / 电脑 / 电视）</span><span class="arrow">→</span>
+    <span class="node">API 服务器（上传与元数据）</span><span class="arrow">→</span>
+    <span class="node">原始存储（Blob）</span><span class="arrow">→</span>
+    <span class="node">转码服务器群</span><span class="arrow">→</span>
+    <span class="node">转码后存储</span><span class="arrow">→</span>
+    <span class="node">CDN</span><span class="arrow">→</span>
+    <span class="node">观看端</span>
+  </div>
+  <div class="flow">
+    <span class="node minor">API 服务器 → 元数据数据库（标题、描述、大小）</span>
+  </div>
+  <p>分工的逻辑很朴素：<b>视频流本身不经过 API 服务器</b>——播放直接从 CDN 拉，API 只处理"除了看视频以外的一切"：上传请求、元数据更新。数据分两类走两条路：视频文件进 Blob 存储，元数据进数据库，两者并行，谁也不等谁。</p>
+  <p>上传的完整链路：视频先进原始 Blob 存储，转码服务器把它转成多种格式；转码一完成，兵分两路——转码后的视频送去转码后存储、再分发到 CDN；同时"转码完成"事件进入完成队列（completion queue），完成处理器（completion handler）据此更新元数据、通知用户"你的视频可以看了"。元数据上传也是并行的：客户端同时发请求，带上文件名、大小、格式。</p>
+  <p>播放链路更短：视频通过边缘服务器（edge server）直接从 CDN 传输，延迟最低。流媒体协议有好几种——MPEG-DASH、Apple HLS、Adobe HDS，不同协议支持不同的视频编码和播放器，所以转码才要一种视频转出多种格式。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文第 1–12 节的顺序）</h2>
+
+  <h3><span class="no">1</span>视频转码：为什么要"变身"</h3>
+  <p>原始视频为什么不能直接发？三个理由：<b>省存储</b>——原始文件太大，转码压缩后省空间；<b>保兼容</b>——手机、电视、浏览器各有各的脾气，一种格式喂不饱所有设备；<b>适配网速</b>——Wi-Fi 上看 4K、地铁里看 480P，画质要跟着网络状况走。转码是上传后必经的第一道工序。</p>
+
+  <h3><span class="no">2</span>容器与编解码器：视频文件的两层结构</h3>
+  <p>拆开一个视频文件，里面是两样东西。<b>容器（Container）</b>像包装盒，把视频、音频、元数据封在一起，比如 MP4、AVI；<b>编解码器（Codecs）</b>是压缩和解压缩的算法，比如 H.264、VP9。盒子决定能不能装，算法决定压得多狠、画质剩多少——转码就是换盒子、换算法的组合。</p>
+
+  <h3><span class="no">3</span>有向无环图（DAG）模型：把一道大工序拆成流水线</h3>
+  <p>转码在计算上又贵又慢，一个视频从头压到尾要好几个小时。解法：<b>有向无环图（DAG, Directed Acyclic Graph）</b>。它把编码、缩略图生成、水印这些任务画成一张依赖图——谁先谁后、谁能并行，一目了然，视频处理因此可以<b>高度并行</b>。原始视频先被拆成视频、音频、元数据三路：视频送去编码（转成分辨率、编解码器、比特率各不相同的版本），缩略图可由用户上传也可系统自动生成，水印则是叠在画面上的身份标识。</p>
+
+  <h3><span class="no">4</span>预处理器（Preprocessor）：先切小块，再排工序</h3>
+  <p>流水线的第一道工位，管四件事。<b>视频拆分</b>：把视频流按画面组（Group of Pictures, GOP）对齐切成更小的片段——GOP 对齐是为了让每个片段都能独立解码；旧客户端也按 GOP 对齐来拆。<b>生成 DAG</b>：它根据客户端程序员写的配置文件生成任务图，流水线排产不是写死的。<b>留后手</b>：GOP 和元数据存进临时存储，万一编码失败，系统拿这些持久化的数据重试，不用从头再来。</p>
+
+  <h3><span class="no">5</span>DAG 调度器（DAG Scheduler）：排产的工段长</h3>
+  <p>它把 DAG 图拆成一个个任务阶段，丢进资源管理器的任务队列。阶段 1 先分出视频、音频、元数据；到了阶段 2，视频再拆成两个并行任务：视频编码和缩略图生成。调度器不管"谁来干"，只管"先干什么、后干什么、什么可以一起干"。</p>
+
+  <h3><span class="no">6</span>资源管理器（Resource Manager）：派活的调度室</h3>
+  <p>它负责资源分配的效率，手下是<b>三个队列加一个调度器</b>：<b>任务队列</b>（待执行任务的优先队列）、<b>工作进程队列</b>（各工作进程利用率信息的优先队列）、<b>运行队列</b>（正在运行的任务和执行它的工作进程）；<b>任务调度器</b>从队列里挑最优的任务/工作进程配对，指挥被选中的工作进程开工。哪台机器空、哪个任务急，都在这里算清楚。</p>
+
+  <h3><span class="no">7</span>任务工作进程、临时存储与输出：干活的和暂存的</h3>
+  <p><b>任务工作进程（Task Workers）</b>是真正执行转码的工人，不同的工人跑不同的任务。<b>临时存储</b>放重试要用的中间数据——选哪种存储系统，取决于数据类型、大小、访问频率和生命周期。<b>输出</b>就是包装完毕、随时可以分发到 CDN 的转码后视频。</p>
+
+  <h3><span class="no">8</span>速度优化一：并行上传，断点续传</h3>
+  <p>上传慢是用户流失的头号原因。把大视频拆成小块并行上传，传得更快；某一块失败了只重传那一块，天然支持<b>断点续传</b>——1 GB 的视频传了一半断网，不用从头再来。</p>
+
+  <h3><span class="no">9</span>速度优化二：就近上传与消息队列</h3>
+  <p>两条。其一，<b>分布式上传中心</b>：用离用户近的 CDN 节点当上传入口，视频少跑半程冤枉路。其二，<b>并行处理</b>：各环节用<b>消息队列（Message Queue）</b>解耦——存储、转码、通知各干各的，一个环节不用等另一个环节，整条流水线高度并行，突发流量也被队列接住慢慢消化。</p>
+
+  <h3><span class="no">10</span>安全优化一：预签名 URL（Pre-Signed URLs）</h3>
+  <p>上传入口必须验明正身。服务端给授权用户签发一个带过期时间的<b>预签名 URL</b>，用户拿着它直接往 Blob 存储传视频——没签名的请求一律拒之门外。好处是上传流量绕开 API 服务器直进存储，还天然带了权限和时效双保险。</p>
+
+  <h3><span class="no">11</span>安全优化二：视频保护的三件套</h3>
+  <p>防盗版三招并用：<b>DRM 系统</b>（数字版权管理），例如 Apple FairPlay、Google Widevine，按平台和播放器各配各的；<b>AES 加密</b>，内容本身加密传输和存储；<b>水印</b>，把身份标识烙在画面上，泄露了能追到人。</p>
+
+  <h3><span class="no">12</span>成本节约：从 $150,000 里抠钱</h3>
+  <p>针对第一节那张天价账单，原文给了四记组合拳：<b>只让热门视频走 CDN</b>，冷门视频由高容量服务器直接提供，CDN 流量瞬间瘦身；<b>冷门视频按需编码</b>，没人看的视频不提前转码，省存储省算力；<b>按地区分发</b>，根据热度把视频拷到离观众近的地方；<b>自建 CDN 并与 ISP 合作</b>，绕开 CloudFront 的零售带宽价，把最大的那块成本打下来。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>CDN 是最贵的零件：每天 $150,000，比存储贵一个量级——架构的大半决策都是围绕"少让 CDN 干活"做的。</li>
+      <li>只让热门视频走 CDN，意味着<b>长尾视频要看运气</b>：回源播放的延迟和体验，就是省下来的那笔钱。</li>
+      <li>转码计算昂贵又耗时，但拆得越碎并行度越高、失败重试越便宜——GOP 对齐和临时存储是给流水线上的保险，省不得。</li>
+      <li>错误处理分两类：<b>可恢复错误</b>（上传、转码、资源分配失败）就重试；<b>不可恢复错误</b>（视频损坏）停止处理、返回错误码——别对着坏文件无限重试。</li>
+      <li>安全是乘法不是加法：预签名 URL 管上传入口，DRM / AES / 水印管内容本身，少一环就漏。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>上传两条线并行：视频进 Blob 存储，元数据进数据库；<b>播放只认 CDN</b>，API 服务器不碰视频流。</li>
+      <li>转码是一座流水线工厂：GOP 切块 → DAG 排产 → 资源管理器派活 → 工作进程并行干，失败靠临时存储重试。</li>
+      <li>CDN 账单决定架构：热门走 CDN、冷门回源、没人看的不预转、最终自建 CDN 联手 ISP——省钱就是设计。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../14.%20Youtube/Readme.zh-CN.md">14. Youtube/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="13.html"><span>上一讲</span>13 · 搜索自动补全 →</a>
+  <a class="next" href="15.html"><span>下一讲</span>15 · Google Drive →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

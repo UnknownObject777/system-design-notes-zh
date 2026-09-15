@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第2讲 · 信封背面的估算</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g1">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 2 讲 · 信封背面的估算</span>
+  <a href="01.html">← 上一讲 01</a>
+  <a href="03.html">下一讲 03 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 2 讲 / 共 28 讲 · 第一阶段「打底子」</div>
+  <h1>信封背面的估算</h1>
+  <div class="en">Back-of-the-Envelope Estimation</div>
+  <p class="one"><b>一句话：</b>在信封背面花几分钟，算出系统要多大、多快——这是每个设计的第一道工序。</p>
+  <div class="stats">
+    <span class="stat">Twitter 案例：峰值 QPS ≈ 7000</span>
+    <span class="stat">媒体存储：5 年 ≈ 55 PB</span>
+    <span class="stat">内存 100 ns vs 磁盘寻道 10 ms</span>
+    <span class="stat">可用性目标：≥ 99.9%（三个 9）</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">搬家</span>搬家前你不会先买一千个纸箱，而是站在客厅里粗算一遍：三个书架，每架两百本书，一个纸箱装五十本，大约十二个纸箱；厨房碗碟两箱；再加上衣柜。十几分钟，信封背面就能写下"大概要二十个纸箱、一辆中型货车、跑两趟"。<b>估算就是这件事</b>：不是量到毫米，而是防止叫来的车装不下、租的仓库放不下。</div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>这一讲解决的问题很具体：<b>设计开始之前，这个系统会有多大、多快？</b>一台服务器够不够？数据库会不会三个月就被写爆？缓存要配多少内存？</p>
+  <p>Google 资深研究员 Jeff Dean 说过，这类估算的价值在于用思维实验和常见性能基准来检验设计是否满足需求。面试官考的不是算术，而是<b>你能不能在一无所知的情况下，凭常识把数量级猜对</b>。数量级对了，方案就立得住；差了一千倍，方案就是空中楼阁。</p>
+  <p>估算前先立假设。原文拿 Twitter 当例子，假设条件如下：</p>
+  <table class="num">
+    <tr><th>假设</th><th>取值</th></tr>
+    <tr><td>月活跃用户（MAU，Monthly Active Users）</td><td>3 亿</td></tr>
+    <tr><td>日活跃用户占比（DAU，Daily Active Users）</td><td>50%</td></tr>
+    <tr><td>每用户每天发推文数</td><td>2 条</td></tr>
+    <tr><td>含媒体内容的推文占比</td><td>10%</td></tr>
+    <tr><td>数据保留期限</td><td>5 年</td></tr>
+  </table>
+  <p>这五条假设是全部计算的起点。它们不必精确——真实业务数据你可能根本拿不到——但必须<b>写下来、说得清</b>，因为后面每一个数字都是从这里乘出来的。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>估算没有架构图，它有的是一条<b>乘法链</b>：从最大的人口数字出发，一层层乘下去，每乘一步就得到一个资源数字：</p>
+  <div class="flow">
+    <span class="node">假设（MAU · 行为）</span><span class="arrow">→</span>
+    <span class="node">流量估算（QPS）</span><span class="arrow">→</span>
+    <span class="node">峰值 QPS（×2）</span><span class="arrow">→</span>
+    <span class="node">存储估算（条数 × 大小 × 天数）</span><span class="arrow">→</span>
+    <span class="node">缓存 · 带宽 · 服务器数量</span><span class="arrow">→</span>
+    <span class="node">对照延迟表检查</span>
+  </div>
+  <p>为什么要这样排？因为估算的每一步只依赖前一步：<b>DAU × 每人发几条 ÷ 一天的秒数</b>，得到平均每秒要处理多少条；峰值再翻一倍，是留给早晚上下班尖峰的余量。流量定了，存储就好算：每天多少条、每条多大、存几年，三个数一乘就是总数据量。最后用<b>延迟数据（Latency Numbers）</b>当尺子量一量——比如这个方案要不要碰磁盘、要不要跨机房——方案行不行，几分钟内就有答案。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文第 1–3 节的顺序）</h2>
+
+  <h3><span class="no">1</span>2 的幂：先把"多大"说清楚</h3>
+  <p>这解决什么问题：数据量的单位本身。<b>2 的幂（Power of Two）</b>是这行的母语：1 KB = 2<sup>10</sup> 字节，1 MB = 2<sup>20</sup>，1 GB = 2<sup>30</sup>，1 TB = 2<sup>40</sup>，1 PB = 2<sup>50</sup>。心中有这张表，"55 PB 等于多少 TB""一条 1 MB 的推文一天 3000 万条占多少"这类换算就是条件反射。单位换算错一位，整个估算就偏出一千倍——这就是为什么它是第一课。</p>
+
+  <h3><span class="no">2</span>每个程序员都应知晓的延迟数据</h3>
+  <p>这解决什么问题：<b>两个方案哪个快，不能凭感觉，要有刻度尺</b>。原文给出 2020 年的一组基准（记住量级就够）：</p>
+  <table class="num">
+    <tr><th>操作</th><th>延迟</th></tr>
+    <tr><td>L1 缓存访问</td><td>0.5 ns</td></tr>
+    <tr><td>L2 缓存访问</td><td>7 ns</td></tr>
+    <tr><td>主内存访问</td><td>100 ns</td></tr>
+    <tr><td>SSD 随机读取</td><td>150 µs</td></tr>
+    <tr><td>数据中心内往返</td><td>500 µs</td></tr>
+    <tr><td>HDD 随机寻道</td><td>10 ms</td></tr>
+    <tr><td>跨区域数据中心往返</td><td>150 ms</td></tr>
+  </table>
+  <p>三个关键洞察：<b>内存快，磁盘慢</b>——两者相差十万倍；<b>尽可能避免磁盘寻道</b>，所以后面每一讲都在想往内存里塞数据；<b>跨机房传数据前先压缩</b>，带宽比 CPU 贵得多。看这张表就明白为什么缓存和 CDN 是标配：它们在帮请求跳过表上最慢的那几行。</p>
+
+  <h3><span class="no">3</span>可用性指标：几个 9</h3>
+  <p>这解决什么问题：SLA 谈判和设计目标定多高。高可用（High Availability，HA）用<b>几个 9（nines）</b>来表示：</p>
+  <table class="num">
+    <tr><th>可用性</th><th>每年停机时间</th></tr>
+    <tr><td>99%（两个 9）</td><td>约 3.65 天</td></tr>
+    <tr><td>99.9%（三个 9）</td><td>约 8.8 小时</td></tr>
+    <tr><td>99.99%（四个 9）</td><td>约 52 分钟</td></tr>
+    <tr><td>99.999%（五个 9）</td><td>约 5.3 分钟</td></tr>
+    <tr><td>99.9999%（六个 9）</td><td>约 31.56 秒</td></tr>
+  </table>
+  <p>Amazon、Google、Microsoft 这些云服务商的服务等级协议（SLA，Service Level Agreement）目标是 <b>99.9% 或更高</b>。每多一个 9，允许的停机时间就缩小十倍——架构的复杂度也跟着上一个台阶，所以定目标前先想清楚这笔账。</p>
+
+  <h3><span class="no">4</span>假设条件：数字从哪来</h3>
+  <p>这解决什么问题：估算的输入。没有假设就没有估算。回到 Twitter 的例子：3 亿 MAU、50% 日活、每人每天 2 条推文、10% 带媒体、存 5 年。注意这些数字都是<b>粗粒度的整数</b>——3 亿不是 3.07 亿，因为估算的第一要求是算得动，不是算得准。</p>
+
+  <h3><span class="no">5</span>估算过程：两笔账，乘法链走到底</h3>
+  <p>这解决什么问题：把假设变成可验证的资源数字。第一笔是<b>流量账</b>：DAU = 3 亿 × 50% = 1.5 亿；推文 QPS = 1.5 亿 × 2 条 ÷ 24 小时 ÷ 3600 秒 ≈ <b>3500</b>；峰值 QPS 按 2 倍算 ≈ <b>7000</b>。第二笔是<b>存储账</b>：一条推文 = tweet_id 64 字节 + 正文 text 140 字节 + 媒体 media 1 MB；每日媒体存储 = 1.5 亿 × 2 条 × 10% × 1 MB = <b>每天 30 TB</b>；5 年就是 30 TB × 365 × 5 ≈ <b>55 PB</b>。看到 55 PB 你就知道：单机硬盘想都别想，分布式存储是必答题。</p>
+
+  <h3><span class="no">6</span>四舍五入与近似计算</h3>
+  <p>这解决什么问题：算得快。精确度不重要，<b>过程才重要</b>。把数凑成整数再算：<code>99987 / 9.1</code> 直接当成 <code>100000 / 10 = 10000</code>。估算的比值在两位有效数字内都是成立的，为第三位小数浪费面试的十分钟，是舍本逐末。</p>
+
+  <h3><span class="no">7</span>写下假设条件</h3>
+  <p>这解决什么问题：可追溯。估算一半靠算，一半靠假设；假设不写，十分钟后连自己都忘了 3500 这个数是从 3 亿还是 1.5 亿出发的。把假设列在黑板或纸上，面试官随时可以挑战其中任何一条，你改一个数、整条链重算一遍就行——<b>这正是估算该有样子</b>。</p>
+
+  <h3><span class="no">8</span>标注单位</h3>
+  <p>这解决什么问题：避免歧义。写 <code>5 MB</code>，不要只写 <code>5</code>。单位丢了，后面的乘法会 silently 错出千倍——55 PB 写成 55，没人知道是 PB 还是 TB。一行小字，挡住最大的事故。</p>
+
+  <h3><span class="no">9</span>常见估算场景</h3>
+  <p>这解决什么问题：知道面试要算哪几样。五类常备：<b>QPS</b>（每秒查询数，流量强度）、<b>峰值 QPS</b>（尖峰余量）、<b>存储需求</b>（总数据量）、<b>缓存需求</b>（内存要留多少）、<b>服务器数量</b>（硬件要几台）。每类都是同一条乘法链的不同终点，练熟一条，五类通吃。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>估算的一切结论都挂在假设上：<b>假设错了，算得再快也是错的</b>——所以假设必须写下来、可以被挑战。</li>
+      <li>峰值 QPS 按 2 倍估只是经验值，遇到秒杀、春晚这类尖峰业务远远不够，要按业务形状再调。</li>
+      <li>延迟数据是 2020 年的快照：硬件会进步，具体数字会过时，但"内存比磁盘快十万倍"这类量级关系不会变。</li>
+      <li>可用性每多一个 9，允许的停机时间就缩十倍，架构成本和复杂度跟着跳一档——别把 SLA 当口号喊。</li>
+      <li>取整是主动丢精度换速度：量级对了就行，但单位必须标清，否则错一千倍都无人察觉。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>先列假设再算数：MAU → DAU → QPS → 峰值 ×2 → 存储（条数 × 大小 × 天数），一条乘法链走到底。</li>
+      <li>背下延迟尺：内存 100 ns、SSD 150 µs、磁盘寻道 10 ms、跨机房 150 ms——方案快不快，拿它量。</li>
+      <li>估算重过程不重精度：取整、标单位、写下假设，数量级对了就是满分。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../02.%20Back%20Of%20the%20Envelope%20Estimation/Readme.zh-CN.md">02. Back Of the Envelope Estimation/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="01.html"><span>上一讲</span>01 · 从一台电脑到一百万用户 →</a>
+  <a class="next" href="03.html"><span>下一讲</span>03 · 系统设计面试框架 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第20讲 · 监控告警：给机器量体温</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g4">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 20 讲 · 监控告警：给机器量体温</span>
+  <span><a href="19.html">← 上一讲</a>&nbsp;&nbsp;<a href="21.html">下一讲 21 →</a></span>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 20 讲 / 共 28 讲 · 第四阶段「地理与数据」</div>
+  <h1>监控告警：给机器量体温</h1>
+  <div class="en">Metrics Monitoring &amp; Alerting</div>
+  <p class="one"><b>一句话：</b>给十万台机器量体温——每台机器每分钟上报几百项指标，谁发烧就打电话叫醒工程师。这一讲就是搭一套工业级的"体温计 + 护士站 + 呼叫铃"。</p>
+  <div class="stats">
+    <span class="stat">规模：1 亿 DAU · 约 1000 万个指标</span>
+    <span class="stat">保留：原始 7 天 → 1 分钟精度 30 天 → 1 小时精度 1 年</span>
+    <span class="stat">写入：InfluxDB 单机 25 万次/秒</span>
+    <span class="stat">告警：邮件 · 短信 · PagerDuty · webhook</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">住院监护</span>一间十万床位的大医院：每个病人身上贴着体温计、心率带（指标来源），护士按点挨床量体温（指标采集），量完记进病历本——每页只记一项指标、按时间往下写（时序数据库）。医生想看哪个病人，查病历比挨个跑病房快（查询服务）；值班护士盯着监护大屏（可视化系统），谁超过 38.5 度，灯就亮、铃就响，同时通知家属、主治医生和护士长（告警系统）。<b>监控告警系统，就是给机器们开的这样一间监护病房。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>"监控系统"这个词很虚——日志聚合、链路追踪都算监控。面试里第一件事是把范围钉死：<b>只监控运维指标，不碰日志（ELK 那套）和分布式追踪</b>。</p>
+  <p>需求对话大致是这样：给谁用？公司内部。监控什么？CPU 负载、内存、磁盘空间，外加每秒请求数这类高层指标，业务指标不做。规模多大？数据保留多久？精度能降吗？告警走哪些渠道？假设与边界如下：</p>
+  <table class="num">
+    <tr><th>项目</th><th>假设 / 结论</th></tr>
+    <tr><td>被监控规模</td><td>1 亿日活跃用户（DAU）；1000 个服务器池 × 100 台机器 × 每台约 100 个指标 ≈ <b>1000 万个指标</b></td></tr>
+    <tr><td>数据保留</td><td>共 1 年；新收到的原始数据保留 <b>7 天</b>，之后 30 天滚动聚合到 <b>1 分钟</b> 精度，30 天后再聚合到 <b>1 小时</b> 精度</td></tr>
+    <tr><td>可监控的指标</td><td>CPU 负载、请求数、内存使用量、消息队列里的消息数等</td></tr>
+    <tr><td>告警渠道</td><td>电子邮件、电话（短信）、PagerDuty、webhook</td></tr>
+    <tr><td>不在范围内</td><td>日志监控（ELK 技术栈）、分布式系统追踪</td></tr>
+  </table>
+  <p>非功能需求四条：<b>可扩展</b>（指标和告警会一直涨）、<b>低延迟</b>（仪表盘和告警查询不能慢）、<b>可靠性</b>（不能错过关键告警）、<b>灵活性</b>（以后能接新技术）。注意一个直觉：这类系统的数据是<b>写密集、突发读</b>——每分钟千万级数据点涌进来，但平时没人看，出故障时大家才蜂拥来查。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>原文把系统拆成五个核心动作：采集、传输、存储、告警、可视化。落到组件上，数据这样流动：</p>
+  <div class="flow">
+    <span class="node">指标来源（应用服务器 / 数据库 / 消息队列）</span><span class="arrow">→</span>
+    <span class="node">指标采集器 ×N</span><span class="arrow">→</span>
+    <span class="node">Kafka 队列</span><span class="arrow">→</span>
+    <span class="node">时序数据库</span><span class="arrow">→</span>
+    <span class="node">查询服务</span><span class="arrow">→</span>
+    <span class="node">可视化系统</span>
+  </div>
+  <div class="flow">
+    <span class="node minor">查询服务</span><span class="arrow">→</span>
+    <span class="node minor">告警系统（规则 → 事件 → 通知）</span><span class="arrow">→</span>
+    <span class="node minor">邮件 / 短信 / PagerDuty / webhook</span>
+  </div>
+  <p>数据长什么样？指标就是<b>时间序列（time-series）</b>：一串带时间戳的值，用"指标名 + 一组标签（tag）"标识。通用格式叫<b>行协议（line protocol）</b>，长这样：<code>CPU.load host=webserver01,region=us-west 1613707265 50</code>——指标名、标签、时间戳、值。想算"过去 10 分钟 us-west 所有 Web 服务器的平均 CPU"，就把匹配的行捞出来取平均。Prometheus、OpenTSDB 都用这套话。</p>
+  <p>为什么链路中间要塞一个 Kafka？为什么查询不直接打到库上？先记住两个动机：<b>缓冲</b>（时序库挂了数据不丢）和<b>解耦</b>（告警、可视化都不绑死某个数据库，将来换库无痛）。存储是整个设计的核心——通用数据库调优能顶一阵但不该用；专门的时序数据库（InfluxDB、Prometheus，以及 Twitter 的 MetricsDB、AWS 的 Timestream、基于 HBase 的 OpenTSDB）才是为这种写海量、按标签聚合的场景生的。细节放到第三步。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文深入设计各节的顺序）</h2>
+
+  <h3><span class="no">1</span>指标采集：体温怎么量上来</h3>
+  <p>解决"数据怎么从十万台机器收上来"。先明确一个心态：<b>偶尔丢一点数据不关键</b>，客户端即发即弃（fire and forget）可以接受。然后选两条路之一。<b>拉取（pull）</b>：采集器维护一份"要采谁、多久采一次"的清单，用 ZooKeeper 或 etcd 做服务发现（service discovery），定时去每台机器的 <code>/metrics</code> 端点抓数据。好处是端点随时能用浏览器打开调试，应用不响应时立刻知道它宕了——拉取在调试和健康检查上都赢。<b>推送（push）</b>：每台机器旁边装一个采集代理（collection agent），代理先就地聚合，再推给采集器；短生命周期的批处理任务活得比拉取间隔还短，只能靠推（拉取模型可以加一个推送网关 push gateway 补救）。推送常用 UDP，延迟更低；但采集器可能被压垮，必须放在负载均衡器后面的自动扩缩容组（auto-scaling group）里，而且任何客户端都能推，要用白名单或鉴权保证数据真实性。</p>
+  <p>规模大了，一个采集器不够用，但多个采集器得商量好别重复采同一块。办法很眼熟：把服务器和采集器都放上<b>一致性哈希环</b>，一组服务器固定归一个采集器（第 5 讲的轮子又转起来了）。谁更好？没有明显赢家——Prometheus 用拉，CloudWatch 和 Graphite 用推，大组织可能两种都要。</p>
+
+  <h3><span class="no">2</span>扩展指标传输管道：库挂了，数据别丢</h3>
+  <p>解决"下游抖动别把采集冲垮"。采集器把指标推进 <b>Kafka</b>，由消费者或流处理服务（Apache Storm、Flink、Spark）处理后再写进时序数据库。三个好处：Kafka 是高可靠、可扩展的分布式消息平台；采集和处理解耦；数据先留在 Kafka 里，时序库宕机也不丢。分区可以按指标名称开，消费者按名称聚合；再扩展一步，按标签分组分区，还能给要优先采集的指标排个序。代价是 Kafka 的运维开销；不想养 Kafka，可以换 Gorilla 这类大规模摄入系统。</p>
+
+  <h3><span class="no">3</span>聚合可以在哪里进行：在哪儿把细数据揉粗</h3>
+  <p>解决"1 亿个原始点太浪费，在哪儿合并"。三个位置，各有取舍：<b>采集代理</b>——客户端只能做简单聚合，比如攒够 1 分钟的计数器再发，最省带宽；<b>摄入管道</b>——写库之前用 Flink 这类流处理引擎聚合，写入量大减，但原始数据没了，精度永久损失；<b>查询侧</b>——可视化跑查询时现算，数据一点不丢，但每次都要扫海量数据，查询会慢。想省存储就早点聚合，想保真就推迟到查询时。</p>
+
+  <h3><span class="no">4</span>查询服务：给数据库加个前台</h3>
+  <p>解决"仪表盘和告警不该直接扒数据库"。把查询服务独立出来，可视化和告警就跟数据库解耦了——想换时序库，只动这一层。还可以在服务里加缓存层，给时序库减负。甚至完全可以不要它：主流可视化和告警系统的插件足够多，选对了库就不需要自己造轮子。为什么不用 SQL 查时序数据？一个指数移动平均用 SQL 要写嵌套三层窗口函数，用 InfluxDB 的 <b>Flux</b> 语言几行管道就完事。顺带一提：InfluxDB 为每个标签建索引，所以按标签聚合飞快——但标签的基数（cardinality）一定要压低，唯一标签太多索引会爆。</p>
+
+  <h3><span class="no">5</span>存储层：存得起，还要查得快</h3>
+  <p>解决"1 年的海量数据怎么存、怎么查"。选型是第一决策。Facebook 的研究给了一个关键数字：<b>约 85% 对运维数据的查询针对过去 26 小时以内</b>——新数据是热点。InfluxDB 这类库就是吃透了这个特性（内存缓存 + 磁盘存储），单机 8 核 32GB 的配置每秒能处理超过 25 万次写入。无论选谁，三板斧都能用：<b>数据编码和压缩</b>——比如双增量编码（double-delta），时间戳有规律，只存增量不存全值；<b>降采样（down-sampling）</b>——高分辨率变低分辨率省磁盘，按数据科学家配好的规则执行：7 天不降、30 天降成 1 分钟粒度、1 年降成 1 小时粒度（原文例子：10 秒一个点，30 秒粒度取平均后从 6 行变 2 行）；<b>冷存储（cold storage）</b>——没人看的旧数据挪进廉价存储，成本差出一个量级。</p>
+
+  <h3><span class="no">6</span>告警系统：谁发烧，叫醒谁</h3>
+  <p>解决"指标越线时，可靠地打扰该打扰的人"。规则用 YAML 配置，加载进缓存服务器。原文的例子：</p>
+  <p><code>alert: instance_down，expr: up == 0，for: 5m，severity: page</code>——实例不可达满 5 分钟才告警，避免抖一下就惊动人。告警管理器按规则里预设的间隔定时调查询服务，命中就创建告警事件。它的另外几件职责：<b>过滤、合并、去重</b>（同一实例反复触发只生成一个事件）；<b>访问控制</b>（告警管理权限只给特定的人）；<b>重试</b>（保证告警至少传播一次）。告警状态存在 Cassandra 这类键值库里，触发后先进 Kafka，再由消费者从 Kafka 拉走，分头投递到邮件、短信、PagerDuty、webhook。现实一句话：现成方案满地都是，自建告警系统很难自圆其说。</p>
+
+  <h3><span class="no">7</span>可视化系统：让人一眼看懂</h3>
+  <p>解决"数字摆在那儿，没人愿意看表"。把指标和告警画成一段时间内的曲线，人脑找趋势比看表格快得多。原文的配图就是 Grafana 搭的仪表盘。同样的提醒：高质量可视化极难做，没有理由不用 Grafana 这类现成方案。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>拉取与推送<b>没有明显赢家</b>：拉取要求所有端点在多机房网络里可达，推送要防假数据、要给采集器做自动扩缩；短任务还得靠推送网关兜底。</li>
+      <li>Kafka 缓冲换来了运维开销；不想养一个集群，可以评估 Gorilla 这类专用摄入系统。</li>
+      <li>聚合做得越早越省存储，但<b>原始精度永久丢失</b>；放到查询侧保真，每次查询又很慢。位置选错，代价都是真实的。</li>
+      <li>标签基数（cardinality）是时序库的命门：唯一标签组合太多，索引体积爆炸，查询反而变慢。</li>
+      <li>告警最大的坑是"该响不响"：过滤、合并、去重、至少一次投递、重试，缺一样就会在深夜出事。</li>
+      <li>告警和可视化在生产里都该用现成的（PagerDuty、Grafana）；面试里要讲清的是"为什么不该自建"。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>指标就是<b>时间序列</b>：指标名 + 标签 + 时间戳；行协议（line protocol）是各系统的通用语。</li>
+      <li>链路五件套：<b>采集 → 队列 → 时序库 → 查询服务 → 告警/可视化</b>；队列挡故障，查询服务负责解耦换库。</li>
+      <li>存储三板斧：吃透"85% 的查询落在 26 小时内"的热点规律，配合编码压缩、降采样和冷存储。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../20.%20Metrics%20Monitoring%20and%20Alerting%20System/README.zh-CN.md">20. Metrics Monitoring and Alerting System/README.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="19.html"><span>上一讲</span>19 · 消息队列：巨大的传话本 ←</a>
+  <a class="next" href="21.html"><span>下一讲</span>21 · 广告点击计数：流水线点钞票 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

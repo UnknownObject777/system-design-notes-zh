@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第27讲 · 数字钱包：记日记的账房</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g5">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 27 讲 · 数字钱包：记日记的账房</span>
+  <a href="26.html">← 上一讲 26</a>
+  <a href="28.html">下一讲 28 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 27 讲 / 共 28 讲 · 第五阶段「真金白银」</div>
+  <h1>数字钱包：记日记的账房</h1>
+  <div class="en">Digital Wallet · 每秒百万笔转账的账房先生</div>
+  <p class="one"><b>一句话：</b>每秒一百万笔转账，账要平、历史要能查、还能从头重放——这一讲把支付平台里那个最不能出错的钱包服务，从一台 Redis 一路改到分片的 Raft 集群。</p>
+  <div class="stats">
+    <span class="stat">规模：100 万 TPS</span>
+    <span class="stat">可用性：99.99%</span>
+    <span class="stat">关键件：2PC · TC/C · Saga · 事件溯源 · Raft</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">账房先生</span>老式钱庄的账房先生管钱有两条铁律：一是<b>每笔钱都记日记账</b>，谁出一块、谁进一块，一行一行写下来，当天进出必须轧平；二是<b>账本只追加、不改写</b>，错了不涂改，另起一行记冲正。查账的人随时可以搬张凳子，从第一页开始把日记账重新誊一遍，任何一天的总数都能重新算出来。<b>数字钱包干的正是这件事，只是账房先生从一个人变成了一万台机器。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>支付平台大多配一个<b>钱包服务</b>：用户把资金存在应用内，可以支付商品、提现，也可以向其他钱包用户转账——走内部账本比走外部支付通道（payment rails）更快、更便宜。这一讲聚焦其中最核心的一个动作：<b>两个钱包账户之间的余额转账</b>。</p>
+  <p>面试里先问清楚规模和要求，需求清单很短，但每条都很硬：</p>
+  <ul class="clean">
+    <li><b>只做钱包间的余额转账</b>，不涉及外汇兑换，也不覆盖收单等其它操作。</li>
+    <li><b>100 万 TPS</b>——每秒一百万笔转账。</li>
+    <li><b>可靠性 99.99%</b>，且必须具备事务性保证（transactional guarantee）：账必须平，不能钱从 A 扣了却没到 C。</li>
+    <li><b>可重现（reproducibility）</b>：对账（reconciliation）只能发现差异，查不出原因；我们要的是能<b>从头重放数据、重建整个历史</b>。这也直接回答了审计的三连问：任意时刻的余额是多少？历史余额对不对？代码改了之后逻辑还对不对？</li>
+  </ul>
+  <p>规模估算一上来就泼了冷水。传统云上的关系型数据库单节点大约只撑得起 ~1000 TPS；而每笔转账包含<b>两笔分录（leg）</b>——借方扣、贷方加，各算一次写，所以 100 万笔转账实际是 <b>200 万次写</b>。单节点越猛，需要的节点越少：</p>
+  <table class="num">
+    <tr><th>单节点 TPS</th><th>所需节点数</th></tr>
+    <tr><td>100</td><td>20,000</td></tr>
+    <tr><td>1,000</td><td>2,000</td></tr>
+    <tr><td>10,000</td><td>200</td></tr>
+  </table>
+  <p>结论：设计的第一个目标不是"堆机器"，而是<b>把单节点的 TPS 压榨上去</b>，节点数才能降得下来。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>把整套系统压成一条数据流，一笔转账请求这样流动：</p>
+  <div class="flow">
+    <span class="node">客户端</span><span class="arrow">→</span>
+    <span class="node">Saga/TC-C 协调者</span><span class="arrow">→</span>
+    <span class="node">钱包服务（无状态）</span><span class="arrow">→</span>
+    <span class="node">命令 FIFO 队列</span><span class="arrow">→</span>
+    <span class="node">状态机（验证 → 生成事件）</span><span class="arrow">→</span>
+    <span class="node">事件列表（Raft 复制）</span><span class="arrow">→</span>
+    <span class="node">余额状态（RocksDB）</span><span class="arrow">⇢</span>
+    <span class="node minor">只读状态机 → 反向代理推回响应</span>
+  </div>
+  <p>请求先进协调者，被拆成两个操作（A 减 1、C 加 1）；每个操作作为<b>命令（command）</b>进入 FIFO 队列，由<b>状态机（state machine）</b>验证后转成<b>事件（event）</b>追加进事件列表；事件落库更新余额状态；只读状态机把结果推回。为什么分这么多层？因为每一层只对自己的职责负责：队列管顺序，状态机管正确性，Raft 管不丢，RocksDB 管快，CQRS 读侧管查询——拆开了，每层才能各自做到极致。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文步骤 2–3 的顺序）</h2>
+
+  <h3><span class="no">1</span>API 设计：一个端点，一个幂等键</h3>
+  <p>接口刻意收敛到只有一个：<code>POST /v1/wallet/balance_transfer</code>，把 from_account、to_account、amount、currency 连同 <b>transaction_id</b> 一起提交。amount 用<b>字符串</b>传，避免浮点精度丢失；transaction_id 是<b>幂等键</b>——同一笔转账网络重试多少次，账本上也只能出现一次。响应里带上 status 和 transaction_id，客户端凭它查结果。</p>
+
+  <h3><span class="no">2</span>内存分片：Redis 集群 + Zookeeper</h3>
+  <p>最朴素的方案：钱包应用为每个账户维护余额，数据结构就是 <code>map&lt;user_id, balance&gt;</code>，用内存 Redis 实现。单个 Redis 节点扛不住 100 万 TPS，就把集群切成多个分区，按 <code>accountID.hashCode() % partitionNumber</code> 定位分区；分区数量和节点地址交给 <b>Zookeeper</b> 存——它是高可用的配置存储。钱包服务本身<b>无状态（stateless）</b>，随便水平扩容。但这个方案有个致命伤：<b>余额分落在两台 Redis 上，转账无法原子执行</b>——扣 A 和加 C 之间断了线，账就坏了。这逼出了下面的分布式事务。</p>
+
+  <h3><span class="no">3</span>两阶段提交（2PC）：先问能不能，再说做不做</h3>
+  <p>经典办法是在分片的关系型数据库上跑<b>两阶段提交（two-phase commit，2PC）</b>：协调者（钱包服务）照常读写多个数据库，准备提交时先让<b>所有数据库 prepare</b>；全都回"是"才发提交，任何一个回"否"就全部中止。思路简单，但代价明确：<b>锁争用（lock contention）让性能很差</b>——prepare 期间锁一直占着；而且<b>协调者是单点故障（single point of failure）</b>。在 100 万 TPS 的目标下，2PC 只能当垫脚石。</p>
+
+  <h3><span class="no">4</span>Try-Confirm/Cancel（TC/C）：把一次事务拆成两次</h3>
+  <p><b>TC/C</b> 是 2PC 的变体，配合<b>补偿性事务（compensating transactions）</b>工作。关键区别：2PC 里第一阶段事务没完成，锁悬着；而 TC/C 第一阶段结束时每个本地事务<b>已经提交或已经取消</b>——两个阶段是两个独立的事务。以 A 转 C 一美元为例：</p>
+  <table class="num">
+    <tr><th>阶段</th><th>操作</th><th>账户 A</th><th>账户 C</th></tr>
+    <tr><td>1</td><td>尝试（Try）</td><td>余额 -$1</td><td>NOP（不做事）</td></tr>
+    <tr><td>2</td><td>确认（Confirm）</td><td>NOP</td><td>余额 +$1</td></tr>
+    <tr><td>2</td><td>取消（Cancel）</td><td>余额 +$1（冲正）</td><td>NOP</td></tr>
+  </table>
+  <p>Try 阶段先把 A 的钱扣下来；两个阶段的数据库都回"是"就走 Confirm，让 C 加钱；任何一步失败就走 Cancel，把 A 扣的钱加回去——加回去这个动作就是"补偿"。对比着记：<b>2PC 第二阶段是提交/取消所有未完成的事务；TC/C 第二阶段是按需执行新事务，或者反转已提交的事务</b>。TC/C 与数据库无关，只要数据库支持事务就行；代价是<b>分布式事务的复杂度全部涌进了业务逻辑</b>。</p>
+
+  <h3><span class="no">5</span>TC/C 的故障模式：阶段状态表与"先扣后加"</h3>
+  <p>协调者中途崩溃了怎么办？靠<b>阶段状态表（phase status tables）</b>：在数据库分片内原子地记下每条分布式事务的 ID 和内容、Try 阶段的状态（未发送/已发送/已收到响应）、第二阶段的名称（Confirm 还是 Cancel）及其状态，还有一个<b>乱序标志</b>。协调者重启后读这张表，接着往下走。</p>
+  <p>更微妙的是一致性窗口：Try 和 Confirm 之间，账面上 A 少了一美元、C 还没多——状态短暂<b>不平衡</b>。可以接受的前提是：总能从这个状态恢复，且<b>用户不能利用中间状态去消费</b>。这靠一条纪律保证：<b>永远先扣减、后增加</b>。Try 阶段在 A 扣钱、C 收 NOP 是唯一合法选择；先给 C 加钱再扣 A 是危险的（用户可能立刻把钱花掉，之后扣款失败），两边同时动又不具备原子性。</p>
+  <p>还有<b>乱序执行</b>：数据库可能先收到 Cancel 再收到 Try。处理办法正是那张表里的乱序标志——先到的 Cancel 把标志置上，后到的 Try 一看标志已设，直接返回失败。</p>
+
+  <h3><span class="no">6</span>Saga：一串本地事务，配上往回走的补偿</h3>
+  <p><b>Saga</b> 是微服务架构里做分布式事务的标准姿势：所有操作排成一个序列，<b>各自在本地数据库里独立提交</b>，依次执行；某一步失败，就掉头往回走，对已经做过的每一步执行补偿操作，一直回到起点。协调方式有两种：<b>编排（Choreography）</b>——各服务订阅事件、各干各的，但业务逻辑被拆进多个服务、靠异步消息串起来，难调试；<b>编配（Orchestration）</b>——单个协调者指挥所有服务按序干活，复杂性被收敛到一处。<b>数字钱包选编配</b>。</p>
+  <table class="num">
+    <tr><th></th><th>TC/C</th><th>Saga</th></tr>
+    <tr><td>补偿动作发生在</td><td>取消阶段</td><td>回滚阶段</td></tr>
+    <tr><td>集中协调</td><td>是</td><td>是（编配模式）</td></tr>
+    <tr><td>执行顺序</td><td>任意</td><td>线性</td></tr>
+    <tr><td>能否并行</td><td>能</td><td>否</td></tr>
+    <tr><td>可能看到部分不一致状态</td><td>是</td><td>是</td></tr>
+  </table>
+  <p>决策依据就一条：<b>TC/C 可以并行化，延迟更低</b>；要极致低延迟选 TC/C，要流程清晰选 Saga。但无论选谁，都还得支持审计和重放，好从失败状态里恢复——这就是下一节。</p>
+
+  <h3><span class="no">7</span>事件溯源（Event Sourcing）：不存余额，存历史</h3>
+  <p>审计三连问——任意时刻的余额？历史余额对不对？代码改了逻辑还对不对？——由<b>事件溯源</b>统一回答。它由四个概念组成：</p>
+  <ul class="clean">
+    <li><b>命令（command）</b>：来自现实世界的意图，比如"A 转 B 一美元"。命令<b>可能失败</b>（IO 错误、状态无效、外部不确定性），所以要有全局顺序，进 <b>FIFO 队列</b>；一条命令可以产生零个或多个事件。</li>
+    <li><b>事件（event）</b>：系统内已经发生的事实，比如"已将一美元从 A 转到 B"。事件是史实，同样进 FIFO 队列保序。</li>
+    <li><b>状态（state）</b>：事件作用的结果，比如"账户 → 余额"的键值存储。</li>
+    <li><b>状态机（state machine）</b>：驱动整个过程——验证命令、应用事件、更新状态。它必须<b>确定性（deterministic）</b>：不读外部 IO、不依赖随机性，给同样的事件序列必产出同样的余额。</li>
+  </ul>
+  <p>落到钱包上：转账请求就是命令，进 Kafka 之类的队列；状态机从队列读命令、从数据库读余额、验证后<b>为每个账户生成两个事件</b>，再逐个应用、更新余额。最大的红利是<b>可重现性</b>：所有状态更新都存成不可变的追加历史，历史余额永远可以<b>从头重放事件重建</b>——因为事件列表不可变、状态机确定，任何中间状态都保证能重放出来。于是审计三问都有了答案：重放到感兴趣的时间点、从头重算全部事件验证正确性、拿不同版本的代码跑同一批事件比对结果。查询余额则由 <b>CQRS</b> 接管：另起多个只读状态机，基于不可变事件列表回答历史查询，与写路径彻底分开。</p>
+
+  <h3><span class="no">8</span>高性能事件溯源：把 Kafka 赶出去</h3>
+  <p>外部队列和数据库意味着网络往返，100 万 TPS 吃不消。优化思路是<b>一切本地化</b>：命令和事件直接追加（append）到本地磁盘——只做追加的写对磁盘极快；再用 <b>mmap</b> 一石二鸟：数据落本地盘，又自动缓存在内存里，省掉重新加载。状态也搬到本地文件系统，用 <b>RocksDB</b>（基于文件的本地存储引擎）：它采用<b>日志结构合并树（log-structured merge-tree，LSM）</b>，为写优化；读性能靠缓存补。最后，<b>定期把快照（snapshot）存成大二进制文件</b>放进 HDFS 这类分布式文件存储——重放到某个状态不必每次从头来，从最近的快照接着放就行。</p>
+
+  <h3><span class="no">9</span>可靠的事件溯源：只给事件列表上 Raft</h3>
+  <p>本地化了，服务就变成<b>有状态</b>的——机器一挂，数据跟着没。先想清楚什么数据值得花可靠性成本：<b>状态和快照都能从事件列表重放重新生成，而事件列表没法从命令列表重新生成</b>（命令是非确定性的）。结论：只需保证<b>事件列表</b>不丢、且各副本内相对顺序一致。方案是<b>Raft</b> 一致性算法：一个活跃领导者（leader）、若干被动跟随者（follower），领导者挂了有跟随者接任，<b>只要过半节点在线系统就继续跑</b>。Raft 保证所有节点的<b>事件列表相同</b>，各节点再各自更新自己的状态。</p>
+
+  <h3><span class="no">10</span>分布式事件溯源：反向代理、推送与分片 Raft 组</h3>
+  <p>单机再猛也有顶：单个 Raft 组容量有限，终要<b>分片 + 分布式事务</b>；CQRS 模式下客户端轮询也慢——频率低了不实时，频率高了压垮查询服务。两步补救：引入<b>反向代理（reverse proxy）</b>，代用户发命令、代用户轮询，一次请求还能捎回多个用户的数据，负载大减；再进一步，让<b>只读状态机在响应就绪时主动把结果推回反向代理</b>，用户感受到的就是实时更新。最后的形态：<b>多个 Raft 组分片，由编排者（orchestrator）用 TC/C 或 Saga 在它们之上做分布式事务</b>。一笔转账的完整生命周期：用户 A 把 <code>A-1</code>、<code>C+1</code> 两个操作发给 Saga 协调者 → 协调者在阶段状态表建记录 → 算出命令该去哪个分区 → 分区 1 的 Raft 领导者验证命令、转成事件、复制到组内节点 → 事件同步到只读状态机，把响应推回协调者 → 协调者记下操作 1 成功，再对 <code>C+1</code> 重复同样流程 → 全部成功，结果告知客户端。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>内存 Redis 分片快，但<b>不是持久化存储</b>，也无法原子执行跨分片转账——别拿它当账本。</li>
+      <li><b>2PC 性能差</b>（锁争用）且<b>协调者是单点故障</b>；它只适合当理解分布式事务的起点。</li>
+      <li>TC/C 和 Saga 都<b>存在部分不一致的可见窗口</b>；纪律是<b>先扣后加</b>，绝不能反过来，也不能两边同时动。</li>
+      <li>TC/C 能并行、Saga 只能线性——<b>选谁取决于延迟要求</b>；代价是复杂度全部进了应用代码。</li>
+      <li>本地化（mmap、RocksDB）换来单节点性能，但服务变有状态；<b>忘了 Raft 复制，就是忘了可靠性</b>。</li>
+      <li>CQRS 下轮询不实时，高频轮询会压垮查询服务；反向代理和推送能缓解，但链路更长、组件更多。</li>
+      <li>命令是非确定性的：<b>事件列表不能从命令列表重建</b>，所以可靠性只保事件列表——这条想错了，审计的地基就塌了。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>转账 = 两笔分录（leg），<b>先扣后加</b>是唯一安全的尝试顺序；补偿是正常流程，不是异常流程。</li>
+      <li><b>事件列表是唯一真相源</b>：状态、快照都能重放重建，事件不能；给事件列表上 Raft，就同时拿到审计和可靠性。</li>
+      <li>路线演进：内存 Redis → 关系库 + 分布式事务（2PC/TC-C/Saga）→ 事件溯源 → 本地化 + Raft 复制 → 分片 Raft 组。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../27.%20%20Digital%20Wallet/README.zh-CN.md">27. Digital Wallet/README.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="26.html"><span>上一讲</span>← 26 · 支付系统</a>
+  <a class="next" href="28.html"><span>下一讲</span>28 · 证券交易所 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

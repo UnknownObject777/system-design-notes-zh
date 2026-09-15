@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第5讲 · 一致性哈希：围成圈分糖果</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g2">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 5 讲 · 一致性哈希：围成圈分糖果</span>
+  <span><a href="04.html">← 上一讲</a>&nbsp;&nbsp;<a href="06.html">下一讲 06 →</a></span>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 5 讲 / 共 28 讲 · 第二阶段「造零件」</div>
+  <h1>一致性哈希：围成圈分糖果</h1>
+  <div class="en">Consistent Hashing</div>
+  <p class="one"><b>一句话：</b>加一台或减少一台服务器时，只动一小部分数据，而不是全部重排。上一讲把数据切成了片，这一讲解决"这片到底该放哪台机器"才会让集群敢随便加减机器。</p>
+  <div class="stats">
+    <span class="stat">哈希空间：0 ~ 2^160-1</span>
+    <span class="stat">哈希函数：SHA-1</span>
+    <span class="stat">加机器：只动一小部分键</span>
+    <span class="stat">用在：DynamoDB · Cassandra · Discord</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">分糖果</span>老师把一万颗糖编上号，撒在一个大圆环上，一群同学围着圈坐。规则只有一条：每颗糖归"从自己位置出发顺时针遇到的第一个同学"。每个同学负责自己面前到下一个同学之间的那一段弧。现在插班来一个新同学，他只从右手边邻居手里接管一小段弧的糖，其他同学手里的糖一颗不动。<b>一致性哈希就是把服务器和同学一样排成圈，加减机器只动相邻那一小段。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>集群里有 N 台服务器，一个 key（缓存键、数据行）进来，该存到哪台？最直觉的写法是取模：<code>serverIndex = hash(key) % N</code>。key 散得匀，服务器负载也匀，看起来没毛病。</p>
+  <p>毛病出在 N 会变。机器会坏、流量会涨，加一台减一台是家常便饭。而取模哈希里，N 是公式的一部分，N 一变，几乎所有 key 算出来的下标都变了：</p>
+  <table class="num">
+    <tr><th>场景</th><th>传统取模哈希的后果</th></tr>
+    <tr><td>服务器数量 N 固定</td><td>运行良好，键均匀分布</td></tr>
+    <tr><td>新增一台服务器</td><td>大多数键被重新分配，引发大面积缓存未命中</td></tr>
+    <tr><td>移除一台服务器</td><td>大多数键搬家，负载过载，数据库被打穿</td></tr>
+  </table>
+  <p>所以这一讲的问题是：<b>怎么设计映射规则，让 N 变化时只有一小部分键重新分布？</b>需求来自所有会加减节点的分布式系统：缓存集群、分片数据库、CDN、负载均衡器。目标两个：重新分布的量最小；数据在各台机器上尽量均匀，别造出热点。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>一致性哈希把"选服务器"从一次取模，变成在环上的一次寻找。数据（key）这样流转：</p>
+  <div class="flow">
+    <span class="node">key</span><span class="arrow">→</span>
+    <span class="node">哈希函数 f（SHA-1）</span><span class="arrow">→</span>
+    <span class="node">哈希环 0 ~ 2^160-1</span><span class="arrow">→</span>
+    <span class="node">顺时针找下一台服务器</span><span class="arrow">→</span>
+    <span class="node">读写落到那台</span>
+  </div>
+  <p>三个零件各司其职：哈希函数负责把任意 key（或服务器的 IP、名称）稳稳地映射到环上的一个点，与服务器数量完全无关；环提供了一种"顺序"，让"下一台"这个说法成立；查找规则只说一句"顺时针遇到的第一个服务器"，简单到没法更简。正因为映射里不出现 N，加减机器才不会掀翻整张表。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文小节顺序）</h2>
+
+  <h3><span class="no">1</span>再哈希问题（Rehashing Problem）</h3>
+  <p>先看清敌人。传统方法 <code>serverIndex = hash(key) % N</code> 在服务器池大小固定时工作得很好；一旦新增或移除服务器，模数 N 变了，大多数键被重新映射——缓存集体失效，请求涌向数据库，系统又慢又危险。这就是再哈希问题：<b>服务器数量变化时，大多数键被重新分布，效率低下、负载过载。</b></p>
+
+  <h3><span class="no">2</span>一致性哈希的定义</h3>
+  <p>定义一句话：一致性哈希确保服务器新增或移除时，<b>只有一小部分键被重新映射</b>。它最大限度减少扰动，天然支持水平扩展。后面几节就是把这句话拆开：环怎么搭、服务器怎么放、key 怎么找、加减机器时边界在哪。</p>
+
+  <h3><span class="no">3</span>哈希空间与哈希环（Hash Ring）</h3>
+  <p>这解决"键和服务器怎么放在同一个坐标系里"。取一个哈希函数（比如 SHA-1），它的输出空间是 <code>0</code> 到 <code>2^160-1</code>。把这条线首尾相连，就得到一个环。用同一个函数 f：key 被哈希到环上的点；服务器按自己的 IP 或名称也被哈希到环上的点。两类点共用一把尺子，"谁离谁近"才有意义。</p>
+
+  <h3><span class="no">4</span>服务器查找（Server Lookup）</h3>
+  <p>这解决"一个 key 到底归谁管"。规则一条：从 key 在环上的位置出发，<b>顺时针遍历，遇到的第一台服务器就是它的归属</b>。每台服务器实际上负责"从它自己（沿顺时针）到下一台服务器之间"的整段弧。查找只走邻居，跟环上一共多少台机器无关。</p>
+
+  <h3><span class="no">5</span>新增与移除服务器</h3>
+  <p>这是重头戏：为什么只有一小部分键搬家。<b>新增服务器</b>时，新节点插进环上某处，它只接管"自己到逆时针方向前驱节点"之间那一段弧上的键，其余键纹丝不动。<b>移除服务器</b>时，它负责的整段弧整体移交给顺时针方向的下一台服务器，别的弧不受影响。两种操作都只扰动一个邻居，这就是"最小化重新分布"的来源。</p>
+
+  <h3><span class="no">6</span>虚拟节点（Virtual Nodes）</h3>
+  <p>基础方法有两个毛病：各服务器分到的分区大小不匀；键的分布不匀，有的机器明显更忙。原因是服务器就那几个点，纯属随机落位，难免有的挤有的空。解法是给每台服务器在环上放<b>多个均匀分布的虚拟节点</b>——一台服务器扮好几个角色。虚拟节点越多，键的分布越均衡，因为<b>虚拟节点数量增加，标准差越小</b>。代价是节点元数据更多，数量要权衡。</p>
+
+  <h3><span class="no">7</span>受影响的键：边界到底画在哪</h3>
+  <p>运维最想知道的其实是"这次要迁移多少数据"。原文给了精确的边界：<b>新增服务器</b>时，受影响的键位于新节点与其前驱节点之间——例子里 s4 上环，沿环逆时针找到的前驱是 s3，那么 s3 与 s4 之间的键重新分布到 s4。<b>移除服务器</b>时，受影响的是被移除节点与其前驱之间的键——例子里 s1 被移除，逆时针找到前驱 s0，s0 与 s1 之间的键重新分布到 s2（s1 的顺时针下一个）。记住方向：永远是一段弧，不是一个集合。</p>
+
+  <h3><span class="no">8</span>一致性哈希的优势</h3>
+  <p>收个尾，三条都是前面推出来的：<b>最小化重新分布</b>——只有一小部分键被重新分配；<b>可扩展性</b>——支持水平扩展，加减机器不再是大手术；<b>缓解热点问题</b>——配合虚拟节点把数据分布做匀，避免个别服务器过载。</p>
+
+  <h3><span class="no">9</span>实际应用</h3>
+  <p>这不是纸上算法，它撑起了不少有名的系统：Amazon DynamoDB、Apache Cassandra 用它做数据分片；Discord 用它调度海量连接；Akamai CDN 用它把内容分配到边缘节点；Google 的 Maglev 负载均衡器也用它做流量分发。学这一个算法，等于把半个互联网的分片底座看明白了。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>基础方法（一台机器一个点）有两个坑：<b>分区大小不均</b>和<b>键分布不均</b>——不加虚拟节点，热点自己会冒出来。</li>
+      <li>虚拟节点不是越多越好：节点越多越均衡，但<b>元数据和维护开销也越大</b>，数量得按标准差和成本一起权衡。</li>
+      <li>加减机器只解决"搬多少"，不解决"谁来搬"：迁移期间旧节点还在服务，<b>读写路径都要能容忍短暂的边界变化</b>。</li>
+      <li>取模哈希在服务器数量固定时依然好用，别为了算法而算法——<b>什么时候 N 真的会动，才需要一致性哈希</b>。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>把 key 和服务器用同一个哈希函数放上环，顺时针遇到的第一个服务器负责它。</li>
+      <li>加减机器只动相邻一段弧——受影响的永远只是"新节点（或被删节点）与前驱之间的键"。</li>
+      <li>分区不匀、负载不匀，靠虚拟节点解决：节点越多标准差越小，但开销越大。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../05.%20Consistent%20Hashing/Readme.zh-CN.md">05. Consistent Hashing/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="04.html"><span>上一讲</span>04 · 限流器 ←</a>
+  <a class="next" href="06.html"><span>下一讲</span>06 · 键值存储 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

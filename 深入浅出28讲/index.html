@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>深入浅出28讲 · 系统设计自学路线</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .idx{max-width:880px;margin:0 auto;padding:0 18px 80px}
+  .intro{padding:52px 0 8px;text-align:center}
+  .intro h1{font-size:clamp(28px,4.5vw,40px);margin:0 0 10px}
+  .intro p{color:var(--muted);font-size:15px;max-width:660px;margin:6px auto}
+  .intro .path{margin-top:14px;font-size:14px}
+  .intro .path b{color:var(--ink)}
+  .gcard{margin:30px 0 8px;font-size:14px;font-weight:700;letter-spacing:2px;padding-left:6px}
+  .gcard small{display:block;font-weight:400;letter-spacing:0;color:var(--muted);margin-top:2px}
+  .item{display:flex;gap:14px;align-items:flex-start;background:var(--paper);border:1px solid var(--line);
+    border-radius:14px;padding:14px 18px;margin:10px 0;text-decoration:none;color:var(--ink)}
+  .item:hover{border-color:var(--muted)}
+  .item .n{flex:0 0 auto;width:40px;height:40px;border-radius:11px;color:#fff;display:flex;
+    align-items:center;justify-content:center;font-weight:700;font-family:Georgia,serif;font-size:17px}
+  .item .t{font-size:16.5px;font-weight:700}
+  .item .t small{font-weight:400;color:var(--muted);font-size:12.5px;margin-left:8px}
+  .item .o{font-size:13.5px;color:#5a5344;margin-top:2px}
+  footer.end{text-align:center;color:var(--muted);font-size:13px;margin:40px 0;line-height:2}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="intro">
+    <h1>深入浅出28讲</h1>
+    <p>每一讲先打个比方入门，再按原文的顺序把完整设计思路走一遍：<br>搞清问题 → 画出大框架 → 逐个零件深入 → 权衡与坑 → 记住 3 点。</p>
+    <p class="path">像爬楼梯一样读：<b>打底子</b> 01–03 → <b>造零件</b> 04–08 → <b>搭系统</b> 09–15 → <b>地理与数据</b> 16–21 → <b>真金白银</b> 22–28</p>
+  </header>
+
+  <div class="idx">
+
+  <div class="gcard" style="color:var(--g1)">第一阶段 · 打底子<small>先建立三个基本功：怎么长大、怎么估算、怎么答题</small></div>
+  <a class="item" href="01.html"><span class="n" style="background:var(--g1)">01</span><span><span class="t">从一台电脑到一百万用户<small>Scaling</small></span><span class="o">一个小网站怎样一步步长大，伺候得了一百万个用户。这是全套课程的总路线图。</span></span></a>
+  <a class="item" href="02.html"><span class="n" style="background:var(--g1)">02</span><span><span class="t">信封背面的估算<small>Back-of-the-Envelope</small></span><span class="o">在信封背面花几分钟，算出系统要多大、多快——面试与设计的第一道工序。</span></span></a>
+  <a class="item" href="03.html"><span class="n" style="background:var(--g1)">03</span><span><span class="t">面试四步走<small>System Design Framework</small></span><span class="o">45 分钟里按固定四步答题：范围 → 高层 → 深挖 → 总结，不慌不忙不跑偏。</span></span></a>
+
+  <div class="gcard" style="color:var(--g2)">第二阶段 · 造零件<small>五个百搭小零件，几乎每套系统都要用</small></div>
+  <a class="item" href="04.html"><span class="n" style="background:var(--g2)">04</span><span><span class="t">限流器：门口的闸门<small>Rate Limiter</small></span><span class="o">每人每分钟只能来几下，防挤爆、防捣乱，还能保证公平。</span></span></a>
+  <a class="item" href="05.html"><span class="n" style="background:var(--g2)">05</span><span><span class="t">一致性哈希：围成圈分糖果<small>Consistent Hashing</small></span><span class="o">加一台服务器只动一小部分数据，而不是全部重排。</span></span></a>
+  <a class="item" href="06.html"><span class="n" style="background:var(--g2)">06</span><span><span class="t">键值存储：全班共用的大字典<small>Key-Value Store</small></span><span class="o">存千亿词条，坏几台机器也不丢数据——Redis、DynamoDB 的底层地图。</span></span></a>
+  <a class="item" href="07.html"><span class="n" style="background:var(--g2)">07</span><span><span class="t">唯一 ID：不发重的学号<small>Unique ID Generator</small></span><span class="o">几万台机器同时发号，全宇宙唯一，还能按时间排大小。</span></span></a>
+  <a class="item" href="08.html"><span class="n" style="background:var(--g2)">08</span><span><span class="t">短链接：给网址起小名<small>URL Shortener</small></span><span class="o">把长网址压成几个字符，点它就能跳回去。</span></span></a>
+
+  <div class="gcard" style="color:var(--g3)">第三阶段 · 搭系统<small>零件攒成七套真实世界的大系统</small></div>
+  <a class="item" href="09.html"><span class="n" style="background:var(--g3)">09</span><span><span class="t">网络爬虫：派机器人搬网页<small>Web Crawler</small></span><span class="o">把全网的网页搬回家，给搜索引擎当原料。</span></span></a>
+  <a class="item" href="10.html"><span class="n" style="background:var(--g3)">10</span><span><span class="t">通知系统：不丢信的小邮局<small>Notification System</small></span><span class="o">每天发上千万条推送、短信、邮件，不丢、不重、不扰民。</span></span></a>
+  <a class="item" href="11.html"><span class="n" style="background:var(--g3)">11</span><span><span class="t">信息流：朋友圈怎么送达<small>News Feed System</small></span><span class="o">你发了帖子，好友的动态页怎么立刻出现它——扇出难题的混合解法。</span></span></a>
+  <a class="item" href="12.html"><span class="n" style="background:var(--g3)">12</span><span><span class="t">聊天系统：一直接通不挂的电话<small>Chat System</small></span><span class="o">几亿人实时互发消息，还能看到对方"在线"。</span></span></a>
+  <a class="item" href="13.html"><span class="n" style="background:var(--g3)">13</span><span><span class="t">搜索补全：猜你想搜的目录树<small>Search Autocomplete</small></span><span class="o">刚敲两个字母就猜出你想搜什么，100 毫秒内给出答案。</span></span></a>
+  <a class="item" href="14.html"><span class="n" style="background:var(--g3)">14</span><span><span class="t">YouTube：视频的搬运与变身<small>Design Youtube</small></span><span class="o">几亿人上传和看视频，关键是转码流水线和省下 CDN 的钱。</span></span></a>
+  <a class="item" href="15.html"><span class="n" style="background:var(--g3)">15</span><span><span class="t">网盘：切块、去重、同步<small>Google Drive</small></span><span class="o">文件存云上，手机改了电脑立刻看到，而且只传改动的部分。</span></span></a>
+
+  <div class="gcard" style="color:var(--g4)">第四阶段 · 地理与数据<small>位置、地图、传话、体检、点钞——数据真正流动起来</small></div>
+  <a class="item" href="16.html"><span class="n" style="background:var(--g4)">16</span><span><span class="t">附近商家：给地球画格子<small>Proximity Service</small></span><span class="o">打开 App 一搜，5000 米内的奶茶店立刻列出来。</span></span></a>
+  <a class="item" href="17.html"><span class="n" style="background:var(--g4)">17</span><span><span class="t">附近好友：叮，朋友在你身边<small>Nearby Friends</small></span><span class="o">好朋友走进你 5 英里内，你的手机立刻"叮"一声。</span></span></a>
+  <a class="item" href="18.html"><span class="n" style="background:var(--g4)">18</span><span><span class="t">Google 地图：一叠会放大缩小的照片<small>Design Google Maps</small></span><span class="o">把全世界的路装进手机，能放大缩小，还能秒算导航。</span></span></a>
+  <a class="item" href="19.html"><span class="n" style="background:var(--g4)">19</span><span><span class="t">消息队列：巨大的传话本<small>Distributed Message Queue</small></span><span class="o">这头写、那头读，各忙各的互不打扰——Kafka 的完整解剖。</span></span></a>
+  <a class="item" href="20.html"><span class="n" style="background:var(--g4)">20</span><span><span class="t">监控告警：给机器量体温<small>Metrics Monitoring &amp; Alerting</small></span><span class="o">给十万台机器量体温，谁发烧就打电话叫醒工程师。</span></span></a>
+  <a class="item" href="21.html"><span class="n" style="background:var(--g4)">21</span><span><span class="t">广告点击计数：流水线点钞票<small>Ad Click Event Aggregation</small></span><span class="o">每秒几万次点击，几分钟内算出每个广告被点了多少次——收钱的依据。</span></span></a>
+
+  <div class="gcard" style="color:var(--g5)">第五阶段 · 真金白银<small>钱和订单进场：一分钱不能错，一毫秒不能慢</small></div>
+  <a class="item" href="22.html"><span class="n" style="background:var(--g5)">22</span><span><span class="t">酒店预订：最后一间房归谁<small>Hotel Reservation</small></span><span class="o">抢订最后一间房，绝不能让两个人同时订到，还允许适度超售。</span></span></a>
+  <a class="item" href="23.html"><span class="n" style="background:var(--g5)">23</span><span><span class="t">电子邮件：五十年老邮局<small>Distributed Email Service</small></span><span class="o">给十亿人做邮箱：收发、存储、搜索，一天几百 PB。</span></span></a>
+  <a class="item" href="24.html"><span class="n" style="background:var(--g5)">24</span><span><span class="t">对象存储：图书馆的合订本<small>S3-like Object Storage</small></span><span class="o">存天文数字的文件，坏多少台机器都不许丢，还要越存越省。</span></span></a>
+  <a class="item" href="25.html"><span class="n" style="background:var(--g5)">25</span><span><span class="t">排行榜：自动排队机<small>Real-time Gaming Leaderboard</small></span><span class="o">百万玩家实时冲榜，查"前十名"和"我排第几"都要飞快。</span></span></a>
+  <a class="item" href="26.html"><span class="n" style="background:var(--g5)">26</span><span><span class="t">支付系统：一分钱都不能错<small>Payment System</small></span><span class="o">收钱这件事，重来一百次也不能重复扣款。</span></span></a>
+  <a class="item" href="27.html"><span class="n" style="background:var(--g5)">27</span><span><span class="t">数字钱包：记日记的账房<small>Digital Wallet</small></span><span class="o">每秒一百万笔转账，账要平、历史要能查、还能从头重放。</span></span></a>
+  <a class="item" href="28.html"><span class="n" style="background:var(--g5)">28</span><span><span class="t">股票交易所：毫秒定胜负的拍卖行<small>Stock Exchange</small></span><span class="o">每秒 21 万笔订单，比快、比公平，撮合不能错一拍——全部 27 讲的集大成者。</span></span></a>
+
+  </div>
+
+  <footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记逐讲改写<br>"打个比方"是帮助理解的比喻，不是原文本身；想深挖就回到各章 Readme.zh-CN.md</footer>
+</div>
+</body>
+</html>

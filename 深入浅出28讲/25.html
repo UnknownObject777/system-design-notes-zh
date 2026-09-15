@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第25讲 · 排行榜：自动排队机</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g5">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 25 讲 · 排行榜：自动排队机</span>
+  <span><a href="24.html">← 上一讲 24</a>　<a href="26.html">下一讲 26 →</a></span>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 25 讲 / 共 28 讲 · 第五阶段「真金白银」</div>
+  <h1>排行榜：自动排队机</h1>
+  <div class="en">Real-time Gaming Leaderboard</div>
+  <p class="one"><b>一句话：</b>百万玩家实时冲榜，查前十名和我排第几都要飞快。难点不在"存下分数"，而在"排名永远现成"——每次得分后，榜单自己保持有序。</p>
+  <div class="stats">
+    <span class="stat">规模：2500 万 MAU · 500 万 DAU</span>
+    <span class="stat">得分峰值：2500 QPS</span>
+    <span class="stat">单月存储：约 650 MB</span>
+    <span class="stat">涨 10 倍：65 GB · 25 万 QPS</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">擂台积分榜</span>游戏厅办月度擂台赛：每月换新榜，赢一局名字旁加一颗星，星星多的名字<b>自动</b>往前挪，永远不用工作人员下班后排一次队。想看前十？榜单最上头一眼扫完。想知道自己排第几？机器直接报号，还能顺带给你看前后各四个人。Redis 的有序集合（sorted set）就是这样一台"自动排队机"——数据进去就是排好序的，查名次只是报个数，不用现数。<b>排行榜系统的全部设计，就是围着这台机器打转。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>给一款在线手机游戏做排行榜。面试时先把问题问清楚，每一条都决定了后面的设计：</p>
+  <ul class="clean">
+    <li><b>分数怎么算？</b>每赢一场比赛得 1 分，规则极简。</li>
+    <li><b>谁上榜？</b>所有玩家，不只前几百名。</li>
+    <li><b>榜有没有时效？</b>每月开一场新锦标赛，同时开一张新榜；旧榜进历史存储。</li>
+    <li><b>要看什么？</b>前 10 名 + 我自己的排名；加分项是我前后各四名。</li>
+    <li><b>同分怎么办？</b>排名相同，先接受并列；有时间再讨论用"最近一次比赛时间"打破平局。</li>
+    <li><b>要实时吗？</b>要。赢一场马上反映在榜上，不接受批量算好的历史结果。</li>
+  </ul>
+  <p>功能需求三条：显示前 10 名；显示指定用户的排名；显示某用户前后各四名（加分项）。非功能需求：分数实时更新、更新实时可见，外加常规的可扩展、可用、可靠。</p>
+  <p>再拍脑袋算一笔账（原文数字）：</p>
+  <table class="num">
+    <tr><th>指标</th><th>数值</th></tr>
+    <tr><td>月活 / 日活</td><td>2500 万 MAU / 500 万 DAU（估算时按 5000 万 DAU 算）</td></tr>
+    <tr><td>平均 / 峰值在线</td><td>50 用户/秒 · 峰值 250 用户/秒</td></tr>
+    <tr><td>得分写入 QPS</td><td>每人每天 10 场 → 500 QPS，峰值 2500</td></tr>
+    <tr><td>前 10 名读取 QPS</td><td>每人每天打开一次 → 50 QPS</td></tr>
+    <tr><td>单月存储</td><td>ID 24 字符 + 分数 16 位 = 26 字节 × 2500 万 ≈ 650 MB</td></tr>
+  </table>
+  <p>结论：写多读少（2500 : 50），总量不大（650 MB），但"查排名"这个操作对普通数据库非常不友好。记住这两个特征，选型就有了方向。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>API 三个就够：</p>
+  <ul class="clean">
+    <li><code>POST /v1/scores</code>——传 <code>user_id</code> 和 <code>points</code>，更新分数。<b>只允许游戏服务器调用，客户端不能直接调。</b></li>
+    <li><code>GET /v1/scores</code>——返回前 10 名，带 <code>rank</code> 和 <code>score</code>。</li>
+    <li><code>GET /v1/scores/{user_id}</code>——返回某用户的分数和排名。</li>
+  </ul>
+  <p>数据这样流动：</p>
+  <div class="flow">
+    <span class="node">客户端（赢了一场比赛）</span><span class="arrow">→</span>
+    <span class="node">游戏服务：验证胜负有效</span><span class="arrow">→</span>
+    <span class="node">排行榜服务</span><span class="arrow">→</span>
+    <span class="node">Redis 有序集合（本月榜）</span>
+  </div>
+  <div class="flow">
+    <span class="node">玩家查询</span><span class="arrow">→</span>
+    <span class="node">排行榜服务</span><span class="arrow">→</span>
+    <span class="node">前 10 名 / 我的排名</span><span class="arrow">·</span>
+    <span class="node minor">MySQL：用户资料 + 比赛记录（兜底重建用）</span>
+  </div>
+  <p>为什么要隔出"游戏服务"这一层？因为分数必须是赢来的。让客户端自己上报分数，等于让玩家自己填成绩单——原文点名了风险：<b>中间人攻击</b>，玩家架个代理就能随意改分。所以写入路径上必须有一个信得过的裁判：服务器验证胜利有效，才代客户端调排行榜服务。对由服务器托管游戏逻辑的游戏，连这一步都省了——胜负本来就是服务器算的，顺手记一分。</p>
+  <p>数据模型有两条候选路：关系型数据库（MySQL）和 Redis。NoSQL 作为备胎留在第三步讨论。先各自走一遍，看看"查我排第几"这关它们各是怎么过的。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文顺序）</h2>
+
+  <h3><span class="no">1</span>关系型数据库方案：先感受"为什么不够"</h3>
+  <p>用户少时最省事的做法：一张排行榜表，每月一张（原文备注：其实加一个 <code>month</code> 列更合理，免得每月维护新表）。用户赢一分，第一次先 <code>INSERT</code>，之后 <code>UPDATE leaderboard SET score=score+1 WHERE user_id='mary1934'</code>。</p>
+  <p>取前 10 名也不难：在 <code>score</code> 上加索引，<code>ORDER BY score DESC LIMIT 10</code>，不用全表扫描。真正的麻烦是<b>查"我排第几"</b>：得跑一条嵌套查询——数出所有分数比我高的人数，那个数加一就是我的排名。这在内部等于对全表做计数排序，行数上到百万级就彻底跑不动。<b>关系库能存榜，但算不出排名</b>——这就是要换零件的原因。</p>
+
+  <h3><span class="no">2</span>Redis 方案：一个结构顶三个查询</h3>
+  <p>Redis 是内存数据存储，快，而且自带一个刚好对口的数据结构：<b>有序集合（sorted set）</b>。它内部一头用哈希映射存 user_id → score，另一头用<b>跳表（skip list）</b>把分数按顺序串起来。关键是：数据<b>始终保持有序</b>——写入时就排好了队，读的时候根本不用排序。</p>
+  <p>跳表是什么？一个有序链表加多级索引。原文的直观例子：64 个节点里找一个值，朴素链表平均要遍历 62 个节点，跳表只要 11 个。代价是增删查都是 O(logN)，换来的是任何规模的榜都能秒回。</p>
+  <p>四个命令撑起整个服务：</p>
+  <ul class="clean">
+    <li><code>ZADD</code>——用户不在就插入，在就更新分数。O(logN)。</li>
+    <li><code>ZINCRBY</code>——分数直接加给定值，新用户从零起。O(logN)。赢一场就是 <code>ZINCRBY leaderboard_feb_2021 1 'mary1934'</code>。</li>
+    <li><code>ZRANGE / ZREVRANGE</code>——按分数取一段。O(logN+M)，M 是返回条数。取前 10 名： <code>ZREVRANGE leaderboard_feb_2021 0 9 WITHSCORES</code>。</li>
+    <li><code>ZRANK / ZREVRANK</code>——查某用户排名。O(logN)。</li>
+  </ul>
+  <p>加分项也顺手解决了：先用 <code>ZREVRANK</code> 拿到我的名次，再 <code>ZREVRANGE leaderboard_feb_2021 357 365</code> 把前后各四名一起取回来。</p>
+  <p>规模核一遍：最坏情况当月 2500 万 MAU 全参与，26 字节 × 2500 万 ≈ 650 MB；就算跳表开销让存储翻倍，现代 Redis 集群也轻松装下。2500 QPS 的写入峰值，单台 Redis 也罩得住。每月建新榜，旧榜挪进历史存储。</p>
+  <p>兜底不能少：<b>起一个 Redis 副本</b>，服务器崩了不丢数据；开 Redis 持久化再上一道保险；MySQL 里建两张辅助表——一张存用户名、显示名等资料，一张存每次赢比赛的记录，基础设施出大事时能拿它重建整张榜。另外一个小优化：前 10 名的用户信息被高频访问，值得单独缓存一份。</p>
+
+  <h3><span class="no">3</span>云服务还是自己管</h3>
+  <p>这解决"谁来养运维"的问题。自己管：Redis 存榜，MySQL 存用户资料，用户资料量大时再给它配一层缓存。上云：AWS API Gateway 把 API 调用路由到 <b>AWS Lambda</b> 函数——无服务器（serverless），按需运行、自动扩展，不用管服务器和扩容配置。原文作者的建议很直接：从零开始做这款游戏，就用云这套。</p>
+
+  <h3><span class="no">4</span>Redis 的扩展：分片的两种切法</h3>
+  <p>单机方案在 5000 万 DAU 内都够用。但假设涨 10 倍到 5 亿 DAU：存储要 65 GB，QPS 到 25 万，单机吃不下了，必须<b>分片（sharding）</b>。两种切法，差别很大。</p>
+  <p><b>按分数范围分区</b>：比如 [0-1)、[1-100)、[100-900)、[900-1000] 各放一个分片，应用代码里维护 user_id 到分片的映射（放在 MySQL 或另一个缓存里）。取前 10 名只需查最高分片 [900-1000]；算我的排名 = 我在本分片内的排名 + 其他所有分片里分数比我高的人数——后者是 O(1) 操作，用 <code>info keyspace</code> 命令直接拿到每个分片的总记录数。</p>
+  <p><b>Redis Cluster 哈希分区</b>：像一致性哈希（consistent hashing）那样把数据散到各节点。麻烦在于：取前 10 名要向<b>每个</b>分片各取前 10，再在应用层合并；K 一大，延迟就涨，而且随分片数量一起涨；更致命的是<b>没有直接办法算某个用户的排名</b>。所以原文作者倾向固定范围分区。</p>
+  <p>两个运维要点：写入量大的 Redis 节点，内存按需求量的<b>两倍</b>分配，给快照留地方；用 <code>redis-benchmark</code> 压测自己的部署，用数据说话。</p>
+
+  <h3><span class="no">5</span>替代方案：NoSQL（DynamoDB）</h3>
+  <p>如果诉求是"海量写入 + 分区内按分数高效排序"，DynamoDB、Cassandra、MongoDB 都值得看。原文选了 <b>DynamoDB</b>：全托管、性能可靠，还能用<b>全局二级索引（global secondary index）</b>查询主键以外的字段。</p>
+  <p>设计要点：把<b>分数做成排序键（sort key）</b>，按分数查才扩得动。但按月分区会造出<b>热点分区</b>——人人只看当月，旧月吃灰。对策是<b>写入分片（write sharding）</b>：给每个键用 <code>user_id % num_partitions</code> 附加一个分区号，把写入摊开。分区数是核心权衡：分片越多写越强，但读要把所有分片<b>扇出收集（scatter-gather）</b>一遍再聚合，分片越多读越慢——定多少，只能 benchmark 说了算。</p>
+  <p>这条路的硬伤和老问题一样：<b>算不出精确排名</b>.规模真到了那一步，可以退一步告诉用户百分位——跑一个 cron 作业定期分析分数分布，比如"10th percentile = score &lt; 100，20th = score &lt; 500……90th = score &lt; 6500"，用户至少知道自己在大约前百分之几。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>让客户端自己报分数 = 让玩家自己填成绩单，中间人攻击一打一个准。<b>写入只能信游戏服务。</b></li>
+      <li>关系型数据库能存榜，但"我排第几"是嵌套 COUNT 查询，行一多就垮——别拿 MySQL 硬扛百万玩家的实时排名。</li>
+      <li>Redis Cluster 哈希分区没有直接算排名的办法；取前 K 名要全分片扇出合并，K 大、分片多，延迟就压不住。</li>
+      <li>范围分区反过来要在应用层维护 user_id → 分片映射——多一本账，多一份心事。</li>
+      <li>分片（write sharding）分区数是个跷跷板：写扩展上去了，读的 scatter-gather 就重；选多少只能靠基准测试。</li>
+      <li>NoSQL 方案给不出"你排第 6"，只能给"你大约在前 20%"——百分位是精确排名的降级品。</li>
+      <li>Redis 会崩：副本 + 持久化 + MySQL 留底，三保险；大规模宕机时用脚本遍历 MySQL 的 WAL 记录重建整张榜。</li>
+      <li>写入量大的 Redis 节点内存要给两倍余量，否则快照没地方放。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>排行榜 = 一个<b>有序集合</b>：写入 <code>ZINCRBY</code> O(logN)，读前十 <code>ZREVRANGE</code>、查名次 <code>ZREVRANK</code>，一个结构全包。</li>
+      <li>要分片时<b>按分数范围分区</b>，别用哈希分区——前十和名次都还算得出来。</li>
+      <li>分数只能由游戏服务写入；客户端直连写榜，榜就脏了。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../25.%20Real-time%20Gaming%20Leaderboard/README.zh-CN.md">25. Real-time Gaming Leaderboard/README.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="24.html"><span>上一讲</span>24 · 对象存储</a>
+  <a class="next" href="26.html"><span>下一讲</span>26 · 支付系统 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

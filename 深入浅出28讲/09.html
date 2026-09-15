@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第9讲 · 网络爬虫：派机器人搬网页</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g3">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 9 讲 · 网络爬虫：派机器人搬网页</span>
+  <a href="08.html">← 上一讲 08</a>
+  <a href="10.html">下一讲 10 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 9 讲 / 共 28 讲 · 第三阶段「搭系统」</div>
+  <h1>网络爬虫：派机器人搬网页</h1>
+  <div class="en">Web Crawler</div>
+  <p class="one"><b>一句话：</b>派一群机器人把全网的网页搬回家、验收、编目，给搜索引擎当原料。难点不在"搬"，而在"搬得快还不讨人嫌"。</p>
+  <div class="stats">
+    <span class="stat">规模：每月 10 亿网页</span>
+    <span class="stat">速度：400 页/秒 · 峰值 800 QPS</span>
+    <span class="stat">存储：5 年 ≈ 30 PB</span>
+    <span class="stat">内容：只收 HTML</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">采购队</span>你管着全城超市的供货，手里有一支采购队。早上发一张起点清单（种子 URL），先指明哪几个大市场值得跑。采购员到摊位搬货（下载网页），回仓库先验收、把烂菜挑出去（内容解析与去重），再从包装上的供应商名单里发现新货源（URL 提取器），登记进采购单。立两条规矩：<b>每个摊位同一时刻只去一个采购员，买完歇口气再去</b>（礼貌性）；抢手的好货排前面先买（优先级）。搜索引擎的爬虫，就是这样一支跑遍全网的采购队。</div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>这一讲要造的是<b>给搜索引擎索引供原料</b>的爬虫（web crawler，也叫蜘蛛 spider 或机器人 robot）：发现和收集网页，存下来等索引。同类机器还有别的用途——网页归档（如美国国会图书馆）、网络挖掘（如对股东报告做金融分析）、网络监测（查版权或商标侵权）——但目标都是一个：<b>从几个已知页面出发，顺着链接把全网走一遍。</b></p>
+  <p>一台好爬虫必须同时满足四条硬指标，缺一条都不算合格：</p>
+  <ol class="clean">
+    <li><b>可扩展性（Scalability）</b>——靠并行化处理数十亿个页面。</li>
+    <li><b>健壮性（Robustness）</b>——扛得住损坏的 HTML、程序崩溃和恶意链接。</li>
+    <li><b>礼貌性（Politeness）</b>——别把请求打得太密，把别人的服务器压垮。</li>
+    <li><b>易扩展性（Extensibility）</b>——新增内容类型时改动最小。</li>
+  </ol>
+  <p>规模假设，全部来自原文：</p>
+  <table class="num">
+    <tr><th>规模</th><td>每月爬取 10 亿个网页</td></tr>
+    <tr><th>速度</th><td>400 页/秒，峰值 800 QPS</td></tr>
+    <tr><th>内容</th><td>只收集 HTML 内容</td></tr>
+    <tr><th>更新</th><td>跟踪新增和更新的页面</td></tr>
+    <tr><th>去重</th><td>忽略重复内容</td></tr>
+    <tr><th>存储</th><td>抓取数据存 5 年，约 30 PB</td></tr>
+  </table>
+  <p>注意最后一行：这不是"爬完就完"的一次性任务。10 亿页 × 持续 5 年，还要回头重爬更新的页面——存储和调度的压力都由此而来。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>对照原文架构图，整条流水线这样转：</p>
+  <div class="flow">
+    <span class="node">种子 URL</span><span class="arrow">→</span>
+    <span class="node">URL 队列</span><span class="arrow">→</span>
+    <span class="node">HTML 下载器</span><span class="arrow">→</span>
+    <span class="node">内容解析器</span><span class="arrow">→</span>
+    <span class="node">内容去重</span><span class="arrow">→</span>
+    <span class="node">内容存储</span>
+  </div>
+  <div class="flow">
+    <span class="node minor">新内容 → URL 提取器 → URL 过滤器 → URL 去重 → 回到 URL 队列（排队接着爬）</span>
+  </div>
+  <p>按工作流程走一遍：先把<b>种子 URL（Seed URLs）</b>放进 <b>URL 队列（URL Frontier）</b>——一个 FIFO 队列，是爬虫的"采购单"。下载器从队列取 URL，经 <b>DNS 解析器</b>换成 IP，把页面抓回来；<b>内容解析器</b>验证页面、丢掉格式错误的；接着<b>内容去重（Content Seen?）</b>用哈希比较判断这页是不是搬过——是新的才放行：<b>URL 提取器</b>从页面里抽出链接，<b>URL 过滤器</b>排除黑名单和坏链接，<b>URL 去重（URL Seen?）</b>对照 <b>URL 存储</b>里已访问的记录剔掉重复的，剩下的唯一链接重新入队。网页本身进<b>内容存储</b>（磁盘，热门内容放内存降延迟）。</p>
+  <p>为什么拆成这么多零件？因为每个零件对应一类麻烦：队列管调度（谁先爬），下载器管搬运，解析器管验收，两道去重管"不白干"，过滤器管"不去不该去的地方"。四性指标就是靠这些分工各自兜住的。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文小节顺序）</h2>
+
+  <h3><span class="no">1</span>DFS 还是 BFS：先想清楚怎么走遍全网</h3>
+  <p>这解决"按什么顺序爬"的问题。整个网络可以看成一张有向图：网页是节点，超链接是边。图遍历两个经典算法——深度优先（DFS）一路扎到底，广度优先（BFS）一层层铺开。DFS 在这里不合适，<b>因为网页的链接深度可能非常深</b>，一条道扎下去就困在局部出不来了，所以爬虫基本用 BFS。但标准的 BFS 有个毛病：它对队列里的 URL 一视同仁，而网页并不平等——门户首页和无人维护的个人页价值天差地别。这个缺陷就是下一节要给 URL 队列加优先级的原因。</p>
+
+  <h3><span class="no">2</span>URL 队列：既要礼貌，又要分先后</h3>
+  <p>这解决"对谁客气、对谁优先、什么时候回头"三个调度问题。一个 FIFO 队列不够用，它得升级成有策略的调度中心。</p>
+  <p><b>礼貌性：</b>核心是<b>同一时刻对每个主机只发一个请求，并在两个下载任务之间加延迟</b>——你不能为了搬得快把人家店门堵死。实现上靠"分队列 + 分线程"：设一个<b>队列路由器（Queue router）</b>，保证每个队列（b1、b2…bn）里只装来自同一主机的 URL；配一张<b>映射表（Mapping table）</b>把每个主机名映射到固定队列；工作线程 1 到 N 各自绑定一个队列，只从自己的队列顺序下载。<b>队列选择器（Queue selector）</b>负责把线程和队列配对。这样每个站点天然被节流，礼貌性不靠自觉，靠结构。</p>
+  <p><b>优先级：</b>重要页面先爬。优先级怎么来？原文给了两把尺子：<b>PageRank</b> 或<b>更新频率</b>。零件是这样的：<b>优先级排序器（Prioritizer）</b>吃 URL、算出优先级；队列 f1 到 fn 各有指定优先级，高优先级队列被选中的概率更高；队列选择器随机选队列，但偏向高优先级的。<b>前端队列（Front queues）</b>管优先级排序，<b>后端队列（Back queues）</b>管礼貌性——前后端各管一摊，互不打架。</p>
+  <p><b>新鲜度：</b>网页会更新，爬过一次不等于永远正确。按更新历史或页面重要性安排<b>重新爬取</b>——更新勤、权重高的页面回头多看看，老死的页面少打扰。</p>
+
+  <h3><span class="no">3</span>HTML 下载器：干活的手，规矩和力气都在这</h3>
+  <p>这解决"怎么又快地、合规地把页面抓回来"。第一条规矩：<b>robots.txt 合规</b>——每个网站根目录下的 robots.txt 写着哪些路径允许爬，下载器必须遵守，这是礼貌性的法律版。力气上四条优化：</p>
+  <ol class="clean">
+    <li>用<b>多台服务器分布式爬取</b>——单机的带宽和连接数是上限，集群才有 400 页/秒。</li>
+    <li>用 <b>DNS 缓存</b>——同一主机的 IP 反复查是浪费，缓存起来直接复用。</li>
+    <li><b>地理上分布</b>爬取服务器——下载端离目标站越近，延迟越低、速度越快。</li>
+    <li><b>超时时间设短</b>——对慢速或无响应的服务器尽早放弃，别把时间耗在装死的站点上。</li>
+  </ol>
+
+  <h3><span class="no">4</span>健壮性：机器会坏，数据会脏，都得预案</h3>
+  <p>这解决"亿级规模下不出大事"的问题。三件套：<b>一致性哈希（Consistent Hashing）</b>在服务器之间有效分配负载——哪台下载机挂了或新加一台，迁移的负载最少，这是第 5 讲的算法在这里的实战；<b>错误处理</b>——防止异常导致系统崩溃，一张坏页面不该拖死整个进程；<b>数据校验</b>——确保抓回来的内容完整，没被截断或污染。</p>
+
+  <h3><span class="no">5</span>易扩展性：新任务来了，加个模块就行</h3>
+  <p>这解决"需求变了不想推倒重来"。把爬虫做成可插拔的：要支持新内容类型，就加一个对应的模块——原文的例子是要爬 PNG 就加 <b>PNG 下载器</b>，要监测侵权就接一个<b>网页监测器</b>（检测版权侵权行为）。流水线骨架不动，新能力像插座一样插上去。</p>
+
+  <h3><span class="no">6</span>避免有问题的内容：三道滤网</h3>
+  <p>这解决"别把垃圾搬回家"。三类问题、三种对策：<b>重复内容</b>——用哈希比较检测，内容哈希值一样的直接丢弃；<b>蜘蛛陷阱（Spider Traps）</b>——有些站点用无穷无尽的动态链接诱使爬虫无限循环，对策是 URL 长度限制之类的技术，把兜圈子的路斩断；<b>数据噪音</b>——过滤广告、垃圾信息等无关内容，别让它们污染仓库。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>礼貌性是速度的天敌：同一主机一次一个请求、任务之间还要加延迟——服务器加得再多，对同一个热门站点也快不起来。</li>
+      <li>蜘蛛陷阱只能缓解、很难根治：URL 长度限制挡得住一类循环，挡不住所有恶意构造。</li>
+      <li>两道去重缺一不可：<b>内容去重</b>管"搬来的东西一样"，<b>URL 去重</b>管"地址见过"——漏一道就重复劳动，30 PB 的账单直接翻倍。</li>
+      <li>四个性质互相拉扯：可扩展、健壮、礼貌、易扩展，顾一头容易丢另一头，设计就是在这四角之间找平衡。</li>
+      <li>JavaScript / AJAX 生成的动态内容抓不到，需要<b>服务端渲染（Server-Side Rendering）</b>兜底，成本立刻上去。</li>
+      <li>规模一大，老问题全回来：数据层要用复制和分片（Database Sharding），爬虫服务器保持无状态才能水平扩展（Horizontal Scaling），还得加反垃圾（Anti-Spam）和分析（Analytics）。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>爬虫是在有向图上做带优先级的广度优先：BFS 打底，按 PageRank 或更新频率加权，重要页面先爬。</li>
+      <li>礼貌性靠结构实现，不靠自觉：队列路由器把同主机 URL 归队，线程绑定队列顺序下载，任务之间加延迟。</li>
+      <li>两道去重（内容 / URL）、一个陷阱（蜘蛛）、一条规矩（robots.txt）——哪个缺了，亿级规模下都会翻车。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../09.%20Web%20Crawler/Readme.zh-CN.md">09. Web Crawler/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="08.html"><span>上一讲</span>08 ←</a>
+  <a class="next" href="10.html"><span>下一讲</span>→ 10</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

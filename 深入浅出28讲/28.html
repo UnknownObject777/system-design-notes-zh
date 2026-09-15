@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第28讲 · 股票交易所：毫秒定胜负的拍卖行</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g5">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 28 讲 · 股票交易所：毫秒定胜负的拍卖行</span>
+  <a href="index.html">回到目录 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 28 讲 / 共 28 讲 · 第五阶段「真金白银」</div>
+  <h1>股票交易所：毫秒定胜负的拍卖行</h1>
+  <div class="en">Stock Exchange</div>
+  <p class="one"><b>一句话：</b>每秒 21 万笔订单涌进来，比快、比公平——撮合顺序错一拍，就是真金白银的纠纷。</p>
+  <div class="stats">
+    <span class="stat">规模：100 个品种 · 每天 10 亿订单</span>
+    <span class="stat">峰值 QPS：215,000（开盘最高）</span>
+    <span class="stat">延迟目标：端到端数十微秒</span>
+    <span class="stat">可用性：99.99%（每天仅 8.64 秒）</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">百米决赛</span>把交易所想成一场百米决赛：几百名选手（订单）挤在起跑线，发令枪一响，谁先撞线全靠高速摄像判到千分之一秒——慢一毫秒，名次就不同。每一帧录像按顺序编号封存（序列号），赛后能一帧不差地回放仲裁（确定性重放）；谁先偷看了计时屏（提前收到行情），谁就破坏了比赛公平。<b>交易所要做的，就是把这场决赛每秒钟办 21 万次，且一次都不能判错。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>这一讲要造的不是普通网站，而是一台<b>不得出错、不得迟到</b>的撮合机器：买单卖单进来，按价格和先后排队，对上就成交，全程毫秒以内。订单状态错一格、成交顺序乱一拍，都是真钱上的纠纷。</p>
+  <p>先和面试官对齐需求（原文的需求澄清问答）：</p>
+  <ol class="clean">
+    <li><b>交易什么</b>——只交易股票，不碰期权、期货。</li>
+    <li><b>什么订单</b>——只支持限价单（Limit Order），操作只有下单和撤单，不做改单。</li>
+    <li><b>什么时间</b>——只覆盖正常交易时段，不支持盘后。</li>
+    <li><b>用户要什么</b>——实时收到成交回报，实时看到订单簿。</li>
+    <li><b>风险检查</b>——做简单的，比如限制一个用户一天最多交易 100 万股苹果股票。</li>
+    <li><b>钱包</b>——下单前先确保资金充足，未完成订单的钱先冻结，订单了结才解冻。</li>
+  </ol>
+  <p>规模假设与非功能需求，数字全部来自原文：</p>
+  <table class="num">
+    <tr><th>项目</th><th>假设</th></tr>
+    <tr><td>交易品种</td><td>约 100 个（symbol）</td></tr>
+    <tr><td>同时交易用户</td><td>数万名</td></tr>
+    <tr><td>每日订单量</td><td>10 亿笔</td></tr>
+    <tr><td>交易时段</td><td>09:30–16:00，共 6.5 小时</td></tr>
+    <tr><td>平均 QPS</td><td>10 亿 ÷ 6.5 ÷ 3600 ≈ 43,000</td></tr>
+    <tr><td>峰值 QPS</td><td>5 × 平均 ≈ 215,000（开盘时段显著更高）</td></tr>
+    <tr><td>可用性</td><td>≥ 99.99%，每天停机不能超过 8.64 秒</td></tr>
+    <tr><td>延迟</td><td>端到端毫秒级，重点盯 99 百分位</td></tr>
+  </table>
+  <p>除了性能，还有几条硬约束：容错和快速恢复（把事故影响圈住）、安全合规（账户体系 + KYC 身份验证 + 防 DDoS）。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>先补一点业务常识（原文的"业务知识 101"）。散户不直连交易所，而是走<b>经纪商（Broker）</b>——Robinhood、Fidelity 这类中介；机构客户用专门的交易软件下大单，还要<b>拆单</b>，避免一笔巨单惊动市场。订单分两种：<b>限价单（Limit）</b>指定价格，可能等不到对手，也可能只成交一部分；<b>市价单（Market）</b>不指定价格，立刻按市价成交。行情上，<b>买价（Bid）</b>是买方肯出的最高价，<b>卖价（Ask）</b>是卖方肯收的最低价；行情分三层——L1 报最优买卖价和数量，L2 报多个价格档位，L3 报每个档位的挂单量和排队量。机构之间传订单用 <b>FIX 协议</b>，一根管道走全场。</p>
+  <p>高层架构上，一条订单这样流动（对照原文的高层设计图）：</p>
+  <div class="flow">
+    <span class="node">客户</span><span class="arrow">→</span>
+    <span class="node">经纪商</span><span class="arrow">→</span>
+    <span class="node">客户端网关</span><span class="arrow">→</span>
+    <span class="node">订单管理器</span><span class="arrow">→</span>
+    <span class="node">排序器</span><span class="arrow">→</span>
+    <span class="node">撮合引擎（订单簿）</span><span class="arrow">→</span>
+    <span class="node">成交（Fill）</span><span class="arrow">→</span>
+    <span class="node">回报客户</span>
+  </div>
+  <div class="flow">
+    <span class="node minor">旁路：撮合引擎 → 市场数据发布者 → 数据服务 → 订阅者</span>
+    <span class="node minor">旁路：撮合引擎 → 报告器 → 数据库（合规 / 结算）</span>
+  </div>
+  <p>主链上每一站分工明确：<b>客户端网关（Client Gateway）</b>做验证、限流、身份认证——它守着大门，但必须保持轻量，因为它在关键路径上；<b>订单管理器（Order Manager）</b>按风险管理器（Risk Manager）的规则做风险检查，再查钱包、冻结资金，然后把订单发给排序器——为了减少带宽，只传必要字段；<b>排序器（Sequencer）</b>给每个入站订单和出站成交盖上序列号；<b>撮合引擎</b>维护每个品种的订单簿，对上就各产生一条成交。</p>
+  <p>两条旁路不在关键路径上，延迟要求完全不同：<b>市场数据流程</b>里，撮合引擎把成交流发给市场数据发布者（Market Data Publisher），它重建订单簿和 K 线图，交给数据服务推给订阅的经纪商——行情晚 100 毫秒无所谓；<b>报告流程</b>里，报告器（Reporter）从订单和成交中收集字段（client_id、price、quantity、order_type、filled_quantity、remaining_quantity）写入数据库，管交易历史、税务报告、合规报告、结算——这条路上准确性比延迟重要。</p>
+  <p>对外接口很朴素（原文的 API 设计，RESTful 走网关和经纪商之间，机构客户另用专有协议满足低延迟）：</p>
+  <table class="num">
+    <tr><th>接口</th><th>作用</th><th>关键字段</th></tr>
+    <tr><td>POST /v1/order</td><td>创建订单</td><td>symbol / side / price / quantity；返回 id、filledQuantity、remainingQuantity、status（new/canceled/filled）</td></tr>
+    <tr><td>GET /execution</td><td>查成交结果</td><td>symbol / orderId / startTime / endTime</td></tr>
+    <tr><td>GET /marketdata/orderBook/L2</td><td>查 L2 订单簿</td><td>symbol / depth；返回 bids、asks</td></tr>
+    <tr><td>GET /marketdata/candles</td><td>查 K 线</td><td>resolution（窗口秒数）；返回 open/close/high/low</td></tr>
+  </table>
+  <p>数据三类：<b>产品（Product）</b>描述品种属性，不常变，服务 UI；<b>订单（Order）</b>是买入/卖出指令，<b>成交（Execution）</b>是撮合后出站的执行结果——关键路径上它们全部在内存里跑，靠排序器持久化和恢复。<b>订单簿（Order Book）</b>按价格档位组织，数据结构要满足：O(1) 查某档位及档位间成交量、快速增删成交、查最优买卖价、遍历档位。<b>K 线图（Candlestick）</b>按时间窗口聚合成开/收/高/低价加成交量，内存只留最近一段，其余落盘，实时分析用内存列式数据库（如 KDB），收盘后转存历史库。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文深潜 1–10 节的顺序）</h2>
+
+  <h3><span class="no">1</span>性能：把延迟从毫秒砍到微秒</h3>
+  <p>解决什么问题？交易所的延迟是按微秒竞争的。照前面的模块图走，服务之间隔着网络，排序器还要写磁盘，端到端只有<b>数十毫秒</b>；目标是<b>数十微秒</b>，差三个数量级。两条路：减少关键路径上的任务数；缩短每个任务的耗时（少碰网络、少碰磁盘）。手段很激进——关键路径上一切不相干的职责全剥掉，<b>连日志记录都移除</b>；然后把所有组件塞进<b>一台巨型服务器</b>，进程之间不走路网络，用 <b>mmap</b>（把磁盘文件映射进应用内存的 UNIX 系统调用）当事件总线；再把文件建在 <code>/dev/shm</code>（共享内存）里，磁盘访问为零。最后一招：关键任务写成一个 while 循环（应用程序循环，application loop），<b>绑死在一个 CPU 核上</b>——不上下文切换，也没有多线程抢锁（无锁，lock-free）。</p>
+
+  <h3><span class="no">2</span>事件溯源：只记变化，不记结果</h3>
+  <p>解决什么问题？订单管理器最难的是状态转换管理：新单、部分成交、全成、撤单，错一步账就对不上。<b>事件溯源（Event Sourcing）</b>的思路是：不存"当前状态"，只存一条不可变的状态转换记录（事件），当前状态任何时候都能从头重放出来。这天然契合交易所——排序器本来就要给事件编号，主实例崩了，副本拿同一份事件流重放，状态一模一样。落到设计上：外部域经 FIX 协议到客户端网关；订单管理器接收新订单事件，校验后更新内部状态，转发给撮合核心；撮合成功就生成 <code>OrderFilledEvent</code> 经 mmap 发出；其他组件订阅事件存储，各做各的处理。再抠一点：把订单管理器打包成<b>库（library）</b>，所有组件人手一份副本，省掉为管订单而跨进程调用。此时排序器的角色也变了：不再是事件存储本身，而是一个<b>单一写入者（single writer）</b>——先把事件排好序，再转发进事件存储，单写者天然没有写冲突。</p>
+
+  <h3><span class="no">3</span>高可用性：每天只许停机 8.64 秒</h3>
+  <p>解决什么问题？99.99% 的可用性摊开算，就是每天最多停机 8.64 秒。做法分两层：先识别架构里的单点，给撮合引擎这类关键服务配<b>待命状态的备份实例</b>，故障检测和切换全部自动化。无状态组件（如客户端网关）好办，加机器水平扩展；<b>有状态组件</b>麻烦些：副本都可以处理入站事件，但只有<b>领导者（leader）</b>发布出站结果。怎么知道主死了？发<b>心跳</b>。这套机制只在单机边界内有效；放大到整机，就设热/温副本整机切换。副本之间复制事件存储，用<b>可靠 UDP（Reliable UDP）</b>——比 TCP 快。</p>
+
+  <h3><span class="no">4</span>容错性：连备份也挂了怎么办</h3>
+  <p>解决什么问题？温实例也宕机是低概率事件，但交易所输不起。大型科技公司的答案：把核心数据复制到<b>多个城市的数据中心</b>，防自然灾害。动手前要回答四个问题：主实例挂了何时切、切到谁、恢复时间（RTO，恢复时间目标）是多少、哪些功能允许降级运行。手段有三：<b>混沌工程（Chaos Engineering）</b>主动制造故障暴露边界情况——因为一个 bug 可能同时搞死主备；切换先<b>手动</b>执行，摸清故障模式再自动化；选主用<b>领导者选举（如 Raft）</b>，靠任期（term）决定谁说了算。最后一条底线是<b>损失容忍度</b>：情况变严重之前能丢多少数据？这决定备份频率。对交易所来说，<b>数据丢失不可接受</b>——所以备份要频繁，再靠 Raft 复制把丢数据的概率压到最低。</p>
+
+  <h3><span class="no">5</span>撮合算法：心脏的跳动逻辑</h3>
+  <p>解决什么问题？成交怎么算出来的，必须快且准。原文的伪代码逻辑：每条入站事件先查序列号，对不上预期的 nextSequence 直接报错拒绝（OUT_OF_ORDER）——这是确定性的闸门；再校验 symbol、price、quantity，然后按类型分派。<b>新单</b>：买单去对手方的卖簿撮合，卖单去买簿；<b>撤单</b>：在 orderMap 里查不到就说明已成交，拒绝（CANNOT_CANCEL_ALREADY_MATCHED），查到就摘除并标记 CANCELED。撮合 match() 在对手方簿里沿价格档位的订单队列逐笔取，成交数量取两边较小值，更新已成交量，生成成交（fill），直到剩余数量（leavesQuantity）归零。同一档位上谁先谁后？<b>FIFO（先进先出）</b>——先到先得，朴素即公平。</p>
+
+  <h3><span class="no">6</span>确定性：同一个输入，永远同一个结果</h3>
+  <p>解决什么问题？主备切换后，副本必须算出和主<b>一模一样</b>的订单簿，否则两边的账对不上。<b>功能确定性</b>靠排序器保证：事件实际发生的物理时间不重要，按序列号顺序处理才重要。<b>延迟确定性</b>是另一条要持续追踪的线：盯 99 甚至 99.99 百分位的延迟。尖峰从哪来？典型例子是 Java 的<b>垃圾回收器（GC）事件</b>——这也是为什么这类系统对语言和运行时极其挑剔。</p>
+
+  <h3><span class="no">7</span>市场数据发布者优化：环形缓冲区与缓存行</h3>
+  <p>解决什么问题？撮合结果要变成全市场看得懂的订单簿和 K 线，而且不能反过来拖慢撮合。内存不是无限的，K 线只保留一部分，客户想要更细的粒度就付更高的价。这里有两个硬核优化：<b>环形缓冲区（Ring Buffer，circular buffer）</b>——固定大小、首尾相连的队列，空间预分配不现分配，而且天然无锁；<b>缓存行填充（padding）</b>——让序列号独享一整条缓存行（cache line），不和别的变量挤在一起，避免伪共享（false sharing）拖慢并发读写。这套数据结构同时用在市场数据服务重建订单簿时。</p>
+
+  <h3><span class="no">8</span>分发的公平性与多播：大家必须同时收到</h3>
+  <p>解决什么问题？如果有人比别人早几毫秒收到行情，他就能抢先下单、割后知后觉者的韭菜——这直接破坏市场公平。所以行情发布要用<b>基于可靠 UDP 的多播（Multicast）</b>。网络传输三兄弟：<b>单播（Unicast）</b>一个源对一个目的地；<b>广播（Broadcast）</b>一个源对整个子网；<b>多播（Multicast）</b>一个源发给跨子网的一组主机。理论上，多播让所有订阅者同时收到。但 UDP 不可靠，包可能到不了每个人——用<b>重传</b>来增强。</p>
+
+  <h3><span class="no">9</span>托管（Colocation）：付费的"近水楼台"</h3>
+  <p>解决什么问题？物理距离就是延迟，晚一毫秒就可能抢不到单。交易所直接提供<b>托管（Colocation）</b>：把经纪商的服务器放进交易所自己的数据中心。延迟大幅降低，这就是一项 <b>VIP 服务</b>——原文里的托管引擎（colo engine）就是这种租给经纪商、放在交易所机房里的交易引擎服务器。</p>
+
+  <h3><span class="no">10</span>网络安全：守住面向公网的大门</h3>
+  <p>解决什么问题？交易所有服务暴露在互联网上，DDoS 是真实威胁。组合拳：<b>隔离</b>——公网服务和私有服务分开，DDoS 打不垮撮合内核；<b>缓存层</b>存更新不频繁的数据；<b>URL 硬化</b>——优先用 <code>https://my.website.com/data/recent</code> 这种可缓存的静态形态，少用 <code>?from=123&amp;to=456</code> 这种查询串，因为前者更易于缓存；再配<b>允许列表/阻止列表（allowlist/blocklist）</b>和<b>速率限制（rate limiting）</b>削峰。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>单机架构是拿"所有鸡蛋放一个篮子"换微秒级延迟——所以热备、温备、跨城复制一层都不能省；且交易所<b>数据丢失不可接受</b>，备份频率要按损失容忍度倒推。</li>
+      <li>UDP 多播快，但不保证送达；丢包靠重传补。"所有人同时收到行情"是理论目标，工程上永远存在残余的不对称。</li>
+      <li>关键路径上连日志都剥掉了——换来延迟，也换来运维盲区，只能靠旁路流程和独立的可观测性系统补。</li>
+      <li>微秒优化都有代价：绑核、无锁环形缓冲区、避开 GC 的语言和运行时选择，牺牲的是开发效率和通用性。</li>
+      <li>领导者选举在单机边界内简单可靠；跨服务器要靠 Raft 的任期，网络分区时"谁说了算"（脑裂）仍是难题。</li>
+      <li>订单簿和 K 线全在内存：不限制内存中的数量、不及时落盘，迟早 OOM。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li><b>排序器是节拍器</b>：序列号定死处理顺序，撮合才可重放、主备才一致——确定性就是交易所的命。</li>
+      <li><b>关键路径只撮合</b>：风险检查、报告、行情全走旁路；单机 + mmap + 绑核无锁，把端到端压到数十微秒。</li>
+      <li><b>公平比快更难</b>：行情多播同发防抢跑，托管是付费特权，99.99% 意味着每天只有 8.64 秒可停机。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../28.%20Stock%20Exchange/README.zh-CN.md">28. Stock Exchange/README.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="27.html"><span>上一讲</span>27 · 数字钱包</a>
+  <a class="next" href="index.html"><span>下一讲</span>回到目录 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

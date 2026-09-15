@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第12讲 · 聊天系统：一直接通不挂的电话</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g3">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 12 讲 · 聊天系统：一直接通不挂的电话</span>
+  <span><a href="11.html">← 上一讲 11</a> <a href="13.html">下一讲 13 →</a></span>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 12 讲 / 共 28 讲 · 第三阶段「搭系统」</div>
+  <h1>聊天系统：一直接通不挂的电话</h1>
+  <div class="en">Chat System · 实时消息传递</div>
+  <p class="one"><b>一句话：</b>让五千万人实时互发消息，还能看到对方在不在线——关键是给每个人都拉一条"接通就不挂"的专线。</p>
+  <div class="stats">
+    <span class="stat">规模：5000 万 DAU</span>
+    <span class="stat">群聊：最多 100 人</span>
+    <span class="stat">单条消息：最长 100,000 字符</span>
+    <span class="stat">聊天记录：永久保存</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">不挂的电话</span>普通网页交互像发短信：问一句、答一句，每次都得重新拨号。轮询（Polling）是你每分钟拨一次电话问"有新消息吗"，绝大多数时候对面只说"没有"；长轮询（Long Polling）是你拨过去不挂机、等对方先开口，可对方一直不说话时，这条线就白占着；WebSocket 则是跟服务器接通一条专线，<b>挂上就不撤，谁有话随时说</b>。聊天系统要做的，就是替五千万人同时守着这些不挂的电话。</div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>我们要造的不是"能发消息"的玩具，而是一个同时满足五件事的聊天应用：<b>一对一聊天、群聊（最多 100 人）、在线/离线状态、多设备同步、离线时的推送通知</b>。这五件事互相纠缠：多设备意味着消息要有全局顺序；在线状态意味着服务器要实时知道谁挂在线上；推送意味着对方不在线时消息不能丢。</p>
+  <p>先把题目给的规模假设钉在墙上：</p>
+  <table class="num">
+    <tr><th>项目</th><th>假设</th></tr>
+    <tr><td>日活跃用户（DAU）</td><td>5000 万</td></tr>
+    <tr><td>聊天形式</td><td>一对一 + 群聊（群成员上限 100 名）</td></tr>
+    <tr><td>消息类型</td><td>基于文本，单条最长 100,000 字符</td></tr>
+    <tr><td>状态显示</td><td>在线 / 离线指示</td></tr>
+    <tr><td>存储要求</td><td>聊天记录<b>永久保存</b>，且支持多设备读取</td></tr>
+  </table>
+  <p>注意"永久保存"四个字：聊天是写多读也多的系统，五千万人产生的消息流水会无限累积。这个约束直接决定了第三步的存储选型——关系型数据库在这里会被数据的长尾拖垮。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>第一个要拍板的问题是：<b>消息怎么从 A 手里到 B 手里？</b>发送方用 HTTP 发消息、保持持久连接即可，难点全在接收方。原文给了三种候选：</p>
+  <ol class="clean">
+    <li><b>轮询（Polling）</b>——客户端定期问服务器"有消息吗？"。实现最简单，但大量请求是白跑的，效率低。</li>
+    <li><b>长轮询（Long Polling）</b>——连接保持打开，直到有消息才返回。比轮询省，但对不活跃的用户仍然低效。</li>
+    <li><b>WebSocket</b>——双向持久连接，收发消息都走它（ws 协议）。<b>这是最终选择</b>：实时、双向，一条连接管一辈子。</li>
+  </ol>
+  <p>选定 WebSocket 之后，整个系统的大框架长这样：</p>
+  <div class="flow">
+    <span class="node">客户端（手机/电脑多设备）</span><span class="arrow">→</span>
+    <span class="node">服务发现（Zookeeper）</span><span class="arrow">→ 推荐 →</span>
+    <span class="node">聊天服务器集群（维护 WebSocket）</span><span class="arrow">→</span>
+    <span class="node">键值存储（聊天记录）</span>
+  </div>
+  <div class="flow">
+    <span class="node minor">旁路：API 服务器管注册/登录/资料</span>
+    <span class="node minor">在线状态服务器管心跳</span>
+    <span class="node minor">通知服务器给离线用户发推送</span>
+  </div>
+  <p>为什么要切成这几块？<b>无状态服务</b>（注册、登录、用户资料）随便加机器；<b>有状态服务</b>（聊天服务器）手里攥着用户的 WebSocket 连接，负责消息投递和同步，是系统的心脏；<b>第三方集成</b>把推送通知外包给通知系统（第 10 讲）。</p>
+  <p>聊天记录为什么用<b>键值存储（key-value store）</b>而不是关系型数据库？原文给了四个理由：它易于水平扩展；访问延迟非常低；关系型数据库扛不住数据的长尾——索引变大后随机访问成本很高；而且 Facebook Messenger、Discord 这些经过验证的聊天应用都这么选。</p>
+  <p>数据模型也跟着定下来：一对一聊天的主键是消息 ID，它决定消息的先后顺序；群聊用复合主键 <code>(channel_id, message_id)</code>。ID 可以用全局 64 位序列号生成器（如 Snowflake）生成，但更优做法是<b>本地序列号生成器</b>——"本地"指 ID 只在某个频道内部唯一。因为只要在一个频道内排好序就够了，没必要让全系统共用一个发号器。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文顺序）</h2>
+
+  <h3><span class="no">1</span>服务发现：进门先帮你挑个座位</h3>
+  <p>这解决什么问题：全球有几百上千台聊天服务器，新上线的客户端该连哪一台？总不能连一台挤爆一台。服务发现（Service Discovery）按<b>地理位置、服务器容量</b>等标准，为客户端推荐最佳的聊天服务器，保证负载分得匀、延迟压到最低。原文的选择是 <b>Apache Zookeeper</b>。它还兼任救火队长：某台聊天服务器故障时，重新分配新服务器。</p>
+
+  <h3><span class="no">2</span>一对一消息流程：四步送达</h3>
+  <p>这解决什么问题：一条消息从 A 发出到 B 收到，中间每一环都可能丢，流程必须定义清楚。原文拆成四步：</p>
+  <ol class="clean">
+    <li>用户 A 向<b>聊天服务器 1</b>发送一条消息。</li>
+    <li>聊天服务器 1 为消息分配一个唯一的消息 ID，并存入键值存储。</li>
+    <li>如果用户 B 在线，消息被转发到<b>聊天服务器 2</b>——B 的 WebSocket 连接挂在这一台上。</li>
+    <li>如果用户 B 离线，则发一条<b>推送通知</b>。</li>
+  </ol>
+  <p>记住这个顺序：<b>先存后送</b>。消息落库之后转发，哪怕 B 暂时不在线，消息也在键值存储里躺着，不会丢。</p>
+
+  <h3><span class="no">3</span>群聊消息流程：复制到每个收件箱</h3>
+  <p>这解决什么问题：一条消息要同时送达 100 个群成员，怎么做同步？原文的方案是<b>扇出写入</b>：消息被复制到群组中每个收件人的个人收件箱（inbox）。每个收件人都有一个收件箱（消息同步队列），装着来自不同发件人的消息。好处是<b>同步被极大简化</b>——每个用户只需读自己的队列；代价是<b>群越大，复制的份数越多，写入代价越高</b>。100 人的上限正是给这个代价上保险。</p>
+
+  <h3><span class="no">4</span>消息同步：一台设备一个游标</h3>
+  <p>这解决什么问题：一个人常有手机、平板、电脑三台设备，在手机上读过的消息，电脑上怎么知道？原文的解法优雅得像个书签：<b>每台设备维护一个变量 <code>cur_max_message_id</code></b>，记录这台设备上见过的最新消息 ID。满足两个条件的消息就是"新消息"：</p>
+  <ul class="clean">
+    <li>收件人 ID 等于当前登录的用户 ID；</li>
+    <li>键值存储中的消息 ID 大于这台设备的 <code>cur_max_message_id</code>。</li>
+  </ul>
+  <p>设备同步时只需带上自己的游标去键值存储里拉"比我大的消息"，哪台设备读到哪，一目了然，互不干扰。</p>
+
+  <h3><span class="no">5</span>在线状态：心跳机制</h3>
+  <p>这解决什么问题：服务器怎么知道谁在线？"在线"不是用户自己报告的，而是<b>客户端定期向在线状态服务器发心跳</b>换来的。如果在某个阈值时间内没收到心跳——原文举例 x = 30 秒——该用户就被标记为离线。超时标记而不是显式告别，是因为客户端可能闪退、断网、手机没电，根本来不及说"我走了"。</p>
+
+  <h3><span class="no">6</span>在线状态扇出：一对好友一个频道</h3>
+  <p>这解决什么问题：A 上线了，怎么让 B、C、D 的头标变绿？原文用<b>发布-订阅（publish-subscribe）</b>模型：每一对好友维护一个频道（channel）。当 A 的在线状态改变时，把事件发布到 A-B、A-C、A-D 三个频道，这三个频道分别被 B、C、D 订阅，他们就能各自收到更新。这个设计<b>在用户群规模较小时很有效</b>——好友关系网是稀疏的，频道数可控；但如果要做百万关注者的大 V 状态广播，就得另想办法了。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>群聊扇出把消息复制到每个收件人的收件箱：<b>同步简单了，但群越大写入代价越高</b>——100 人的群上限不是产品洁癖，是成本控制。</li>
+      <li>轮询大量冗余请求低效；长轮询对不活跃用户低效；WebSocket 也不是白捡的——<b>维护海量持久连接</b>本身就是聊天服务器最大的负担。</li>
+      <li>发布-订阅扇出模型只在用户群规模较小时有效；好友关系一大，频道数爆炸，这套设计就要返工。</li>
+      <li>聊天记录永久保存，数据长尾无限增长：<b>选关系型数据库、靠大索引做随机访问，迟早被拖死</b>——存储选型在这里是生死题。</li>
+      <li>消息投递失败要靠<b>重试和排队</b>兜底；聊天服务器故障要靠服务发现把用户引到新服务器——没有这两道保险，一条消息就可能凭空消失。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>实时聊天的底座是 <b>WebSocket</b>：双向持久连接；轮询和长轮询都只能当历史课。</li>
+      <li>聊天记录进<b>键值存储</b>；消息排序用<b>本地序列号</b>，频道内唯一就够，别上全局发号器。</li>
+      <li>在线状态 = <b>心跳检测</b>（超时即离线）+ <b>发布-订阅扇出</b>（一对好友一个频道）。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../12.%20Chat%20System/Readme.zh-CN.md">12. Chat System/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="11.html"><span>上一讲</span>← 第 11 讲</a>
+  <a class="next" href="13.html"><span>下一讲</span>第 13 讲 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

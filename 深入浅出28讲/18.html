@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第18讲 · Google 地图：一叠会放大缩小的照片</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g4">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 18 讲 · Google 地图：一叠会放大缩小的照片</span>
+  <a href="17.html">上一讲 17 ←</a>
+  <a href="19.html">下一讲 19 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 18 讲 / 共 28 讲 · 第四阶段「地理与数据」</div>
+  <h1>Google 地图：一叠会放大缩小的照片</h1>
+  <div class="en">Design Google Maps</div>
+  <p class="one"><b>一句话：</b>把全世界的路装进手机，能放大缩小，还能秒算导航。秘诀有两个：地图不画成一整张，而是切成一叠小照片按需取用；路不存成表格，而是存成一张"图"再跑寻路算法。</p>
+  <div class="stats">
+    <span class="stat">规模：10 亿日活 · 覆盖全球 99%</span>
+    <span class="stat">位置更新：2500 万次/日 · 峰值 100 万 QPS</span>
+    <span class="stat">瓦片存储：约 70PB（压缩后）</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">马赛克画册</span>把全世界想象成一本厚得离谱的马赛克画册：每一页都裁成同样大小的 256×256 小方格。你看世界地图时，只取"整页一张"的那格；放大到中国，那一格又裂成四个小格，再放大再裂四份——你手里永远只有需要的几格，却以为握着整张地球。而导航则是另一套玩法：把每条路当成线、每个路口当成点，画出一张巨大的"地铁图"，找最短路线就是在图上从 A 点一路摸索到 B 点。<b>地图服务的全部手艺，就是把这两种笨办法做到十亿人同时用也不卡。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>我们要设计一个简化版 Google Maps。它 2005 年上线，到今天有 <b>10 亿日活跃用户</b>、覆盖全球 <b>99%</b> 的地区、每天 <b>2500 万次</b>实时位置更新。面试一上来先对齐范围：</p>
+  <ul class="clean">
+    <li><b>做</b>：用户位置更新、导航（含 ETA 预计到达时间）、地图渲染；支持步行、骑行、驾车；把交通状况算进 ETA。</li>
+    <li><b>不做</b>：多目的地路线、商家地点和照片——先记下，别在设计里蔓延。</li>
+  </ul>
+  <p>非功能需求很硬：<b>准确</b>（不能给用户指错路）、<b>渲染流畅</b>、<b>省流量省电</b>（手机用户随时在移动，数据套餐和电池都金贵），外加通用的高可用、可扩展。</p>
+  <p>动手前还要补四节"地图常识课（Map 101）"，都是后面设计要用的词：</p>
+  <ol class="clean">
+    <li><b>经纬度</b>：地球是绕轴转的球体，位置用纬度（南北）和经度（东西）两个数表示。</li>
+    <li><b>地图投影</b>：把 3D 球面压成 2D 平面必然扭曲几何形状，各家投影各有利弊。Google 用的是 Mercator 投影的改进版——<b>Web Mercator</b>。</li>
+    <li><b>地理编码（Geocoding）</b>：把"地址"翻译成经纬度坐标；反过来叫<b>反向地理编码</b>。常用做法是用插值（interpolation），把街道网络映射到坐标空间。</li>
+    <li><b>GeoHash</b>：把地球当平面，递归切成四个象限，用一串字母数字给每个区域编码——这是后面"瓦片怎么命名、怎么找"的关键。</li>
+  </ol>
+  <p>还有两条直觉。其一，<b>地图渲染靠瓦片化（tiling）</b>：不画一整张巨图，而是把世界切成小瓦片，客户端只下载眼前相关的几格，像拼马赛克；缩放到全世界时只需要一张 256×256 的瓦片，放大一级瓦片数量变四倍。其二，<b>寻路靠图</b>：交叉口是节点、道路是边，主流算法是 Dijkstra 和 A* 的改进版——但全世界这张图太大，内存装不下，所以同样用"瓦片化"思路：把世界切成一张张<b>路由瓦片</b>，瓦片之间互相引用，算法边遍历边拼接大图；远距离路线再用不同详细程度（分层）的瓦片，只加载需要的层级，省内存带宽。</p>
+  <p>规模估算（信封背面）：</p>
+  <table class="num">
+    <tr><th>项目</th><th>数字</th><th>怎么算出来的</th></tr>
+    <tr><td>地图瓦片存储</td><td>约 70PB</td><td>按全部瓦片估算；沙漠等高度相似的瓦片压缩率很高</td></tr>
+    <tr><td>位置更新 QPS</td><td>20 万，峰值 100 万</td><td>10 亿 DAU × 每周 35 分钟 ≈ 每天 50 亿分钟；GPS 更新批量上报</td></tr>
+    <tr><td>道路信息</td><td>TB 级原始数据</td><td>来自各种来源，以路由瓦片形式存储</td></tr>
+    <tr><td>元数据</td><td>可忽略</td><td>小到直接从估算里划掉</td></tr>
+  </table>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>系统对外其实是三条独立的流水线，共用一套地理数据和一堆位置数据：</p>
+  <div class="flow">
+    <span class="node">手机客户端（批量累积位置）</span><span class="arrow">→</span>
+    <span class="node">位置服务</span><span class="arrow">→</span>
+    <span class="node">Cassandra（写多库）</span><span class="arrow">+</span>
+    <span class="node">Kafka 流（交通分析等）</span>
+  </div>
+  <div class="flow">
+    <span class="node">客户端（按 geohash 算瓦片号）</span><span class="arrow">→</span>
+    <span class="node">CDN</span><span class="arrow">→</span>
+    <span class="node">预计算瓦片（S3 / 静态存储）</span>
+  </div>
+  <div class="flow">
+    <span class="node">客户端</span><span class="arrow">→</span>
+    <span class="node">导航服务</span><span class="arrow">→</span>
+    <span class="node">地理编码</span><span class="arrow">→</span>
+    <span class="node">最短路径（A* 跑路由瓦片）</span><span class="arrow">→</span>
+    <span class="node">ETA（机器学习）</span><span class="arrow">→</span>
+    <span class="node">排序器（Ranker）</span>
+  </div>
+  <p>为什么这样拆？<b>位置更新是纯写流量</b>——每秒几十上百万次小写入，和"读地图"完全是两种负载，必须分开伺候；<b>瓦片是静态内容</b>，全世界用户看的是同一张"北京三环"图，天然适合 CDN 缓存，绝不能每次都动态画；<b>导航是计算密集</b>，要在图上寻路、要预测时间、要按用户偏好筛选，链条长，单独成服务才好各自扩容。三个服务的接口形态也写在原文里：位置上报是 <code>POST /v1/locations</code> 带一串 (纬度, 经度, 时间戳)；导航是 <code>GET /v1/nav?origin=…&destination=…</code>，返回距离、时长、导航指引和压缩后的路径折线（polyline）。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文步骤 3 的小节顺序）</h2>
+
+  <h3><span class="no">1</span>数据模型 · 路由瓦片</h3>
+  <p>道路数据从各种来源进来，是非结构化的原始形态，而且会随着位置更新不断改进。怎么办：<b>周期性离线流水线</b>把原始数据加工成基于图的路由瓦片。这些瓦片不需要任何数据库特性（不查、不事务），所以<b>不存数据库，直接放 S3 对象存储，再积极缓存</b>，还能用专门的库把邻接表压成紧凑的二进制文件。为什么折腾离线加工：寻路算法吃的是"图"，不是原始测绘数据，把贵的一次性转换放在离线做，在线寻路才快得起。</p>
+
+  <h3><span class="no">2</span>数据模型 · 用户位置数据</h3>
+  <p>这类数据的用途是更新交通状况和做各种分析。它的负载特征是<b>疯狂写、很少读</b>，所以用 Cassandra。示例行以 <code>user_id</code> 作分区键（快速取到某用户的全部位置更新）、<code>timestamp</code> 作聚类键（按时间排序存放）。为什么不用普通关系库：位置更新每秒几十万，还个个带时间戳追加，Cassandra 的写多扩展性就是为这个生的。</p>
+
+  <h3><span class="no">3</span>数据模型 · 地理编码数据库</h3>
+  <p>存"经纬度对 ↔ 地点"的键值对。负载特征刚好反过来：<b>读多写少</b>，所以用 Redis，读访问快。选型逻辑一句话：写多读少用 Cassandra，读多写少用 Redis——整个数据模型的选库都按负载特征对号入座。</p>
+
+  <h3><span class="no">4</span>数据模型 · 预计算的世界地图图像</h3>
+  <p>地图瓦片图像<b>提前算好、存进 CDN</b>，用户请求时直接从最近的接入点（POP）拿。为什么不动态渲染：动态构建会给服务器带来巨大负载，而且让缓存几乎失效；静态化之后，全世界的用户共享同一份瓦片，CDN 命中率极高，延迟极低。客户端怎么知道要哪张？<b>geohash 在客户端本地就能算出来</b>，直接拼出瓦片 URL。也可以提供一个 API 代算 URL，代价是多一次调用——两条路原文都摆了出来。</p>
+
+  <h3><span class="no">5</span>位置服务：Cassandra 扛写，Kafka 分流</h3>
+  <p>位置更新每 <code>t</code> 秒发一次，客户端先<b>批量累积、批量发送</b>，省流量省电。即便如此，对这个规模仍是巨大写入，所以：NoSQL 库（选 Cassandra）优先<b>可用性而非一致性</b>——位置数据本来就在飞速过期，新更新一到旧的就没意义，为了一致性牺牲可用不值得。然后接 <b>Kafka</b> 把更新流式分发给下游：做更准的 ETA、监控交通、检测封闭道路、分析用户行为。为什么非要 Kafka：一份位置数据要喂给好几拨消费者，用消息队列解耦，生产者和消费者各跑各的节奏。</p>
+
+  <h3><span class="no">6</span>渲染地图：矢量瓦片省带宽</h3>
+  <p>瓦片按缩放级别组织：最低级别一张 256×256 代表全世界，每放大一级，瓦片数量<b>四倍增长</b>。关键优化：不传完整位图，而是把瓦片表示成<b>矢量</b>——路径和多边形，让客户端自己画。带宽大幅省下来，手机上地图还能随缩放平滑缩放变形。为什么敢让客户端画：渲染规则固定，客户端算力足够，换来的是数据量数量级下降。</p>
+
+  <h3><span class="no">7</span>导航服务 · 地理编码与最短路径</h3>
+  <p>导航服务负责在合理时间内找出 A 到 B 的快速路线——<b>允许稍有延迟，但准确性不能打折</b>。内部组件逐个看。先是<b>地理编码服务</b>：把"1355 market street, SF"这样的地址解析成经纬度（示例接口就是 Google 的 geocode API，返回 formatted_address、ROOFTOP 级别精度的坐标等）。然后是<b>最短路径服务</b>：对 S3 里的路由瓦片跑 <b>A* 算法的一种变体</b>。流程：起终点先转成经纬度，推导出 geohash，定位到对应路由瓦片；算法从起始瓦片开始遍历，借助瓦片间的引用一路拼接，直到找到通往目标瓦片的足够好的路径。</p>
+
+  <h3><span class="no">8</span>导航服务 · 路线规划器、ETA 与排序器</h3>
+  <p><b>路线规划器（route planner）</b>汇总结果，算出一条按出行时间优化的建议路线，并调用 <b>ETA 服务</b>——它基于<b>机器学习</b>和实时交通数据预测到达时间。路线不一定是数学上最快的，但 ETA 必须靠谱。最后过<b>排序器（ranker）</b>：按用户的筛选条件（比如"避开收费公路""避开高速"）对多条候选路线排序。还有一个不起眼的 <b>更新器（updater）</b>：异步地把重要数据库刷到最新——慢写不挡导航的主链路。</p>
+
+  <h3><span class="no">9</span>改进：自适应 ETA 与重新路由</h3>
+  <p>交通是活的，导航中的用户要能吃上实时变化。做法：把正在导航的用户和他<b>将要经过的所有路由瓦片</b>存进数据库。哪个瓦片出了交通事故，就查出所有路径经过它的用户，给他们重新算路。但"存全部瓦片"太占空间，原文给了个省法：只存起始瓦片加一串越来越粗的<b>上层瓦片（super）</b>——<code>user_1, r_1, super(r_1), super(super(r_1)), …</code>，检查用户最终瓦片是否覆盖事故瓦片即可判断受影响。还可以跟踪导航用户的全部可能路线，一旦发现更快的走法就推给他们。</p>
+
+  <h3><span class="no">10</span>推送协议：WebSocket 胜出</h3>
+  <p>重新路由、交通突变这类消息要服务器主动推给客户端，选哪个协议？原文比较三种：移动推送通知<b>不可行</b>（负载受限，Web 端也用不了）；<b>WebSocket 优于长轮询（long-polling）</b>，服务器开销小；SSE（服务器发送事件）也行，但 WebSocket 支持<b>双向通信</b>——像最后一公里配送这类功能需要客户端也上行数据，所以倾向 WebSocket。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>瓦片必须静态化 + CDN 化，但代价是<b>geohash 切分方案几乎不可逆</b>——客户端升级很难，选错了要陪着用很多年。</li>
+      <li>位置数据选 Cassandra 是拿一致性换可用性：<b>用户位置天然快速过期</b>，如果业务需要"此刻精确的坐标"，这套设计给不了。</li>
+      <li>寻路性能对图大小极敏感：全世界一张图跑不动，分层路由瓦片是<b>必须的工程妥协</b>——长距离拼接小瓦片依然耗时耗内存，分层粒度调不好就两头不靠。</li>
+      <li>重新路由用"起始瓦片 + 一串 super 瓦片"近似存储，省空间但会<b>带来误判/漏判</b>，粗瓦片覆盖的路不一定真在用户路径上。</li>
+      <li>推送协议没有银弹：SSE 只能下行，长轮询耗服务器资源，移动推送扛不住这个量级——选 WebSocket 是选"双向"，也是接受它的运维成本。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>地图 = <b>瓦片马赛克 + CDN 静态分发</b>；路 = 图（路口为节点、道路为边），寻路 = A* 在分层路由瓦片上跑。</li>
+      <li>位置更新是写多负载：<b>客户端批量上报 + Cassandra 扛写 + Kafka 分流</b>，一条链路各司其职。</li>
+      <li>ETA 靠机器学习吃实时交通数据；<b>重新路由靠提前记下用户要经过的瓦片</b>，出事秒级圈人重算。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../18.%20Google%20Maps/README.zh-CN.md">18. Google Maps/README.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="17.html"><span>上一讲</span>17 · 附近的朋友 →</a>
+  <a class="next" href="19.html"><span>下一讲</span>19 · 分布式消息队列 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

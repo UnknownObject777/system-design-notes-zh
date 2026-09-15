@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第23讲 · 电子邮件：五十年老邮局</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g5">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 23 讲 · 电子邮件：五十年老邮局</span>
+  <a href="22.html">← 上一讲 22</a>
+  <a href="24.html">下一讲 24 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 23 讲 / 共 28 讲 · 第五阶段「真金白银」</div>
+  <h1>电子邮件：五十年老邮局</h1>
+  <div class="en">Distributed Email Service · 分布式电子邮件服务</div>
+  <p class="one"><b>一句话：</b>给十亿人做邮箱：收发、存储、搜索，一年存下约 2,190 PB。协议是半个世纪前的老配方，但底下的每一颗零件都得换成工业级。</p>
+  <div class="stats">
+    <span class="stat">规模：10 亿用户（Gmail 18 亿）</span>
+    <span class="stat">发送：每秒 10 万封</span>
+    <span class="stat">存储：约 2,190 PB/年</span>
+    <span class="stat">附件上限：25 MB</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">老邮局</span>电子邮件系统就是一座跑了五十年的老邮局：发信是把信投进邮筒，SMTP 负责跨城市转运；收件是你家门口的信报箱，IMAP 让信留在箱里等你取；档案馆按收件人分架存放，一格只放一个人的信；查旧信不靠翻箱倒柜，靠卡片索引室。过去这套靠几个办事员就能转，现在要伺候十亿人——邮筒、分拣线、档案馆、索引室，每一间都得换成工厂。<b>这一讲就是给老邮局做工业化改造。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>要设计的是一个<b>类 Gmail 的分布式电子邮件服务</b>。面试先对齐需求：10 亿用户；功能涵盖认证、发送/接收、提取、过滤、搜索、反垃圾——本题先跳过认证；客户端不走传统的 SMTP、POP、IMAP，而是走 HTTP；邮件可以带附件。</p>
+  <p>为什么偏要用 HTTP？因为非功能性需求里写了"灵活性与可扩展性"：邮件协议改不动，HTTP API 想加功能就加。四条硬性要求：</p>
+  <ol class="clean">
+    <li><b>可靠性（Reliability）</b>——不能丢数据，邮件丢了就是事故。</li>
+    <li><b>可用性（Availability）</b>——用副本（replication）消除单点，容忍部分系统故障。</li>
+    <li><b>可扩展性（Scalability）</b>——用户涨，系统跟着涨。</li>
+    <li><b>灵活性与可扩展性（Flexibility &amp; Extensibility）</b>——新功能好加，这也是选 HTTP 的原因之一。</li>
+  </ol>
+  <p>规模假设与估算，原文的数字：</p>
+  <table class="num">
+    <tr><th>假设</th><th>推算结果</th></tr>
+    <tr><td>10 亿用户</td><td>基准规模</td></tr>
+    <tr><td>每人每天发送 10 封</td><td><b>每秒 10 万封</b>发出</td></tr>
+    <tr><td>每人每天接收 40 封，每封元数据约 50 KB</td><td>元数据<b>每年约 730 PB</b></td></tr>
+    <tr><td>20% 的邮件带附件，平均 500 KB</td><td>附件<b>每年约 1,460 PB</b></td></tr>
+  </table>
+  <p>附件以 base64 编码发送，所以比原始文件大约 33%；多数邮件服务把附件限制在 25 MB，个人与企业账户可分别配置。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>先认四个老协议。<b>SMTP</b> 是服务器之间送信的标准；<b>POP</b> 把邮件下载到本地后从服务器删掉；<b>IMAP</b> 也收信，但留在服务器端；<b>HTTPS</b> 严格说不是邮件协议，但网页邮箱全靠它。另外 DNS 里要给邮件域配 <b>MX 记录</b>——它像门牌号，告诉全世界的邮局"这个域的信该送到哪台机器"。</p>
+  <p>传统邮件服务器的样子：Alice 在 Outlook 点发送，信经 SMTP 到 Outlook 服务器；Outlook 查 DNS 找到 gmail.com 的 MX 记录，再把信经 SMTP 转给 Gmail；Bob 用 IMAP/POP 取信。存储很朴素：<b>每封邮件一个文件</b>，躺在本地文件系统上。</p>
+  <div class="flow">
+    <span class="node">Alice 的客户端</span><span class="arrow">—SMTP→</span>
+    <span class="node">Outlook 服务器</span><span class="arrow">—查 MX / SMTP→</span>
+    <span class="node">Gmail 服务器</span><span class="arrow">—IMAP/POP→</span>
+    <span class="node">Bob 的客户端</span>
+  </div>
+  <p>这套在小规模时转得很好，但规模一涨，磁盘 I/O 先成为瓶颈；磁盘会坏、服务器会宕，可靠性和可用性两条都过不了关。于是换成分布式版本，面向 Web 客户端暴露 RESTful API：</p>
+  <div class="flow">
+    <span class="node">Webmail 浏览器端</span><span class="arrow">→</span>
+    <span class="node">Web 服务器（登录/注册/资料）</span><span class="arrow">→</span>
+    <span class="node">元数据库</span><span class="arrow">·</span>
+    <span class="node">附件存储（S3）</span><span class="arrow">·</span>
+    <span class="node">分布式缓存（Redis）</span><span class="arrow">·</span>
+    <span class="node">搜索存储</span>
+  </div>
+  <div class="flow">
+    <span class="node minor">实时服务器（WebSocket 推新邮件，旧浏览器回退长轮询）</span>
+  </div>
+  <p>API 长这样：<code>POST /v1/messages</code> 发信给 To/Cc/Bcc 里的收件人；<code>GET /v1/folders</code> 列文件夹（按 RFC 6154，默认有 All、Archive、Drafts、Flagged、Junk、Sent、Trash）；<code>GET /v1/folders/{folder_id}/messages</code> 分页列信；<code>GET /v1/messages/{message_id}</code> 取单信全文。</p>
+  <p><b>发送链路</b>：用户点发送，信先到负载均衡器——它顺手做限流（rate limiting），再路由到某台 Web 服务器。Web 服务器做基本校验（比如邮件大小）；收件人域名和自己相同就直接短路外发；但垃圾邮件检查一定先做。校验通过进消息队列（附件只存对象存储的引用），失败进错误队列。SMTP 外发工作进程从队列拉信，做垃圾/病毒检查，再投递到目标邮件服务器，同时把信存进"已发送"文件夹。外发队列的长度要盯死：队列疯涨，要么对方服务器不可用（指数退避重试），要么消费者不够（扩容）。</p>
+  <div class="flow">
+    <span class="node">负载均衡器（限流）</span><span class="arrow">→</span>
+    <span class="node">Web 服务器（校验/垃圾检查）</span><span class="arrow">→</span>
+    <span class="node">消息队列</span><span class="arrow">→</span>
+    <span class="node">SMTP 外发工作进程</span><span class="arrow">→</span>
+    <span class="node">目标邮件服务器</span>
+  </div>
+  <p><b>接收链路</b>：来信到 SMTP 负载均衡器，分发到 SMTP 服务器，先执行接收策略（比如直接丢掉无效邮件）；附件太大就放对象存储（S3）；邮件处理工作进程做完初步检查，把信转发到存储、缓存、对象存储和实时服务器。离线的用户重新上线后，走 HTTP API 拉新邮件。</p>
+  <div class="flow">
+    <span class="node">SMTP 负载均衡器</span><span class="arrow">→</span>
+    <span class="node">SMTP 服务器（接收策略）</span><span class="arrow">→</span>
+    <span class="node">邮件处理工作进程</span><span class="arrow">→</span>
+    <span class="node">元数据库 / 缓存 / S3 / 实时推送</span><span class="arrow">→</span>
+    <span class="node">用户拉取（HTTP API）</span>
+  </div>
+  <p>为什么要切成这些模块？元数据是小块高频数据，附件是大块低频数据，必须分家；收发都过消息队列，快慢解耦、削峰填谷；搜索自己一套索引，不和存储互相拖累；缓存只扛最近的邮件——用户十有八九只看新信。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文深入设计 4 节的顺序）</h2>
+
+  <h3><span class="no">1</span>元数据库：信存哪、怎么查</h3>
+  <p>先看数据本身的脾气：头字段（主题、发件人、收件人）很小且被频繁访问；正文大小悬殊，但通常只被读一次；几乎所有操作都局限于单个用户——取信、标已读、搜索；时效性强，用户只读最近的信；可靠性要求极高，<b>数据丢失不可接受</b>。在 Gmail/Outlook 的量级，数据库通常是定制开发的，核心目标是压低每秒输入/输出操作数（IOPS，input/output operations per second）。</p>
+  <p>现成的选项都不太合身：关系型数据库为小块数据优化，撑不起单列个位数 MB 的正文；对象存储适合当备份，但搜索、标已读这类操作它做不了；NoSQL 里 Gmail 用的是 Google BigTable——没开源。所以面试里至少要讲清我们需要的特征：<b>单列可达个位数 MB、强一致性、为减少磁盘 I/O 而设计、高可用且容错、易于做增量备份</b>。</p>
+  <p>分区键选 <code>user_id</code>：一个人的信落在同一个分片上。代价是无法让多个用户共享同一封信——本题不 care。数据表的骨架：主键 = 分区键（管数据分布）+ 聚类键（管数据排序）；要支持的查询包括列文件夹、列某文件夹下的信、增删查信、取已读/未读、取会话线程（加分项）。<code>email_id</code> 用 timeuuid，天然按创建时间排序；附件单独一张表，以文件名标识。</p>
+  <p>一个具体的坑：传统关系型数据库里查"已读/未读"很容易，Cassandra 却禁止在非分区/聚类键上过滤。变通法是把整个文件夹的信拉进内存过滤——规模大了根本不行。正解是<b>反规范化（denormalize）</b>：把邮件表拆成已读表和未读表两张，写的时候多写一份，换查询时的一次命中。</p>
+  <p>会话线程不靠专门的数据结构，靠信头：<code>Message-Id</code>、<code>In-Reply-To</code>、<code>References</code> 三个头字段，邮件客户端读懂它们就能自己重建对话串。最后是关键抉择：<b>我们用可用性换一致性</b>——不丢数据是硬要求，所以故障转移（failover）或网络分区（network partition）时，受影响的用户暂时无法同步和更新。</p>
+
+  <h3><span class="no">2</span>邮件送达率：发得出，更要进得了收件箱</h3>
+  <p>搭一个能发信的服务器容易，让信落进收件人的收件箱难。新服务器贸然发信，大概率被垃圾邮件算法送进垃圾箱。这节全是领域知识：</p>
+  <ul class="clean">
+    <li><b>专用 IP</b>——用独享 IP 发信，否则收件方服务器不信任你。</li>
+    <li><b>邮件分类</b>——营销邮件和正常邮件别从同一台服务器发，免得重要信被连坐。</li>
+    <li><b>预热 IP</b>——在大型邮件提供商那里慢慢攒声誉，一个新 IP 要 <b>2 到 6 周</b>才能热起来。</li>
+    <li><b>快速封禁垃圾发送者</b>——别让个别用户毁了你整台服务器的声誉。</li>
+    <li><b>反馈回路</b>——与 ISP 建立反馈回路，盯投诉率，快速封禁垃圾账户。</li>
+    <li><b>邮件认证</b>——用 SPF（Sender Policy Framework，发件人策略框架）、DKIM（DomainKeys Identified Mail，域名密钥识别邮件）等技术对抗网络钓鱼。</li>
+  </ul>
+  <p>不用全背下来，面试里点出一句就够：<b>做好一个邮件服务器需要大量领域知识</b>。</p>
+
+  <h3><span class="no">3</span>搜索：自己的邮箱，要的是快和准</h3>
+  <p>邮件搜索有两个特点：一是范围只在自己的邮箱里，不是全网；二是<b>写操作多于读操作</b>——每封信的每个动作都要重建索引，而用户很少点开搜索页。和谷歌搜索对着看就清楚了：</p>
+  <table class="num">
+    <tr><th></th><th>谷歌搜索</th><th>电子邮件搜索</th></tr>
+    <tr><td>范围</td><td>整个互联网</td><td>用户自己的邮箱</td></tr>
+    <tr><td>排序</td><td>按相关性</td><td>按时间、日期等属性</td></tr>
+    <tr><td>准确性</td><td>索引需时间，结果不必即时</td><td>索引要快，结果要准</td></tr>
+  </table>
+  <p>方案一：上 <b>Elasticsearch</b> 集群。用 <code>user_id</code> 作分区键，把同一用户的数据归到同一个节点。变更操作走 Kafka 异步投递，把业务服务和重建索引的流程解耦——但实际搜索数据时是同步返回的。ES 是最流行的搜索引擎数据库，全文搜索正是它的主场；代价是它是一个要 alongside 元数据存储一起维护的独立服务。</p>
+  <p>方案二：自研定制搜索引擎。最大的挑战是<b>写密集（write-heavy）负载</b>怎么优化。标准答案是日志结构合并树（LSM，Log-Structured Merge-Trees）：写入路径只为顺序写优化——先在内存里攒数据，到阈值再合并到磁盘的下一层。Cassandra、BigTable、RocksDB 都是这个思路。自研引擎本身就能当数据存储，还能针对邮件场景调优，但要砸进去大量工程。</p>
+  <p>权衡就摆在这：ES 现成、某种程度上可扩展，但多养一个集群；自研能进一步扩展、自带存储，却是条长征路。</p>
+
+  <h3><span class="no">4</span>可扩展性与可用性：各长各的，坏了能切</h3>
+  <p>因为单个用户的操作不会跟其他用户冲突，大多数组件都可以<b>独立扩展</b>——收件多就扩接收链路，搜索慢就扩索引节点，互不相干。高可用靠<b>多数据中心（multi-DC）</b>部署：跨机房放副本，出故障时做主从（leader-follower）故障转移，把流量切到还活着的中心。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>元数据库<b>用可用性换一致性</b>：故障转移或网络分区时，受影响的用户暂时无法同步和更新——这是为了"不丢信"主动咽下去的代价。</li>
+      <li>没有现成数据库完美契合邮件场景：BigTable 不开源，自研意味着单列个位数 MB、强一致、易增量备份这些要求全得自己扛。</li>
+      <li>送达率是暗坑：新 IP 不预热就发信，大概率进垃圾箱；预热要花 2 到 6 周攒声誉。</li>
+      <li>搜索是写密集负载：每封信的每个动作都要重建索引。上 ES 就多养一个集群，自研 LSM 则是个长期工程。</li>
+      <li>同一个附件被不同用户反复转发会重复存储——这是原文留给我们的优化点。</li>
+      <li>还有一整片没展开的硬骨头：容错（节点故障怎么处理）、合规（GDPR 下 PII 怎么存）、安全（邮件加密、防钓鱼、安全浏览）。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>邮件要拆成三段管：元数据走定制 NoSQL、附件进对象存储、搜索交给独立引擎，各扩各的。</li>
+      <li>一切围绕 <code>user_id</code> 分区：用户之间无冲突，组件才能各自水平扩展。</li>
+      <li>发信最难的不是发，是<b>送达率</b>：专用 IP、预热 2 到 6 周、SPF/DKIM，全是领域知识。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../23.%20Distributed%20Email%20Service/README.zh-CN.md">23. Distributed Email Service/README.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="22.html"><span>上一讲</span>← 22</a>
+  <a class="next" href="24.html"><span>下一讲</span>24 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

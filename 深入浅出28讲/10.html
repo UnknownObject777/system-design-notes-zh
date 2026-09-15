@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第10讲 · 通知系统：不丢信的小邮局</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g3">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 10 讲 · 通知系统：不丢信的小邮局</span>
+  <span><a href="09.html">← 上一讲 09</a> · <a href="11.html">下一讲 11 →</a></span>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 10 讲 / 共 28 讲 · 第三阶段「搭系统」</div>
+  <h1>通知系统：不丢信的小邮局</h1>
+  <div class="en">Notification System</div>
+  <p class="one"><b>一句话：</b>每天发上千万条推送、短信、邮件，不丢、不重、不扰民。这一讲把通知系统拆成一条流水线：谁触发、谁校验、谁排队、谁投递，每一环都为"可靠"两个字服务。</p>
+  <div class="stats">
+    <span class="stat">推送通知：1000 万条/天</span>
+    <span class="stat">短信：100 万条/天</span>
+    <span class="stat">电子邮件：500 万条/天</span>
+    <span class="stat">投递要求：软实时 · 可退订</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">小邮局</span>通知系统就是一间日处理上千万封信的大邮局：窗口只管收信（触发服务把"账单到期""物流更新了"投进邮筒）；分拣员核验地址、翻电话簿（通知服务器查联系方式）；信件按目的地分装上不同传送带（消息队列），传送带满了能暂存，不会把窗口挤爆；最后各家投递公司取走自己的信——苹果家的信使管 iOS，谷歌家的管 Android，Twilio 管短信，SendGrid 管邮件。邮局还得记底账防丢信、给每封信编号防重复投递、尊重住户门口"谢绝推销"的牌子（退订与限流）。<b>建好这间邮局，就是本讲的全部内容。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>这一讲要解决的<b>不是</b>"怎么调一个 send() 接口"，而是：一个每天发出上千万条消息的系统，怎样做到<b>软实时（soft real-time）、低延迟，同时不丢、不重、允许用户退订</b>。需求拆开看：</p>
+  <ol class="clean">
+    <li><b>三路通知：</b>推送通知（Push notification）、短信（SMS）、电子邮件（Email）。</li>
+    <li><b>多平台：</b>iOS、Android、桌面端都要覆盖。</li>
+    <li><b>两种触发：</b>客户端 App 触发，或服务器上的定时任务（cron job）触发。</li>
+    <li><b>可退订：</b>用户能关掉特定类型的通知。</li>
+  </ol>
+  <p>规模假设（原文数字）：</p>
+  <table class="num">
+    <tr><th>渠道</th><th>每天发送量</th><th>由谁投递</th></tr>
+    <tr><td>推送通知</td><td>1000 万条</td><td>APNS（iOS）/ FCM（Android）</td></tr>
+    <tr><td>短信</td><td>100 万条</td><td>Twilio / Nexmo</td></tr>
+    <tr><td>电子邮件</td><td>500 万条</td><td>SendGrid / Mailchimp</td></tr>
+  </table>
+  <p>三路合计 1600 万条/天，摊平每秒不到 200 条，看起来不大。但账单日、大促零点这种时刻，流量会是均值的几十倍——<b>系统要扛的是尖峰，不是平均值。</b>这个判断直接决定了第二步为什么必须加消息队列。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>一条通知从产生到送达，数据这样流动：</p>
+  <div class="flow">
+    <span class="node">触发服务<br>（微服务 / cron job）</span><span class="arrow">→</span>
+    <span class="node">通知服务器 ×N</span><span class="arrow">→</span>
+    <span class="node">消息队列</span><span class="arrow">→</span>
+    <span class="node">工作线程 worker ×N</span><span class="arrow">→</span>
+    <span class="node">第三方服务</span><span class="arrow">→</span>
+    <span class="node">用户</span>
+  </div>
+  <div class="flow">
+    <span class="node minor">缓存 / 数据库：设备令牌表 · 用户表 · 通知设置表 · 模板</span>
+  </div>
+  <p><b>触发服务</b>只负责"出事"：账单到期、物流更新，它生成一个通知事件。可以是微服务，可以是定时任务，也可以是触发通知事件的分布式系统。<b>通知服务器</b>是前台：对外提供发送 API、做基本校验（邮箱和电话格式对不对）、从缓存或数据库取出渲染通知要的元数据。</p>
+  <p>第一版设计把数据库、缓存全焊死在通知服务器里，立刻撞三面墙：<b>单点故障（SPOF）</b>——一台通知服务器挂了全系统崩溃；<b>扩展性差</b>——数据库、缓存、处理逻辑谁也独立扩不了；<b>性能瓶颈</b>——发通知是资源大户，一台机器很快被拖死。改进设计就三招：数据层分离出去、通知服务器水平扩展成多实例、中间夹一个<b>消息队列（message queue）</b>。队列是缓冲带：突发流量先排队，<b>工作线程（worker）</b>按自己的节奏从队列拉事件、调第三方服务。</p>
+  <p>最后一公里的投递全部外包：<b>苹果推送通知服务（APNS）</b>管 iOS 推送，<b>Firebase Cloud Messaging（FCM）</b>管 Android，Twilio、Nexmo 发短信，SendGrid、Mailchimp 发邮件——没人自建短信网关和邮件服务器。</p>
+  <p>邮局发货前得有通讯录。装机或注册时收集三样东西：<b>设备令牌（device token）</b>、电话号码、邮箱地址。device token 进<b>设备令牌表</b>，电话和邮箱进<b>用户表</b>。没有这张表，通知服务器连信该寄给谁都不知道。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文步骤 3 的顺序）</h2>
+
+  <h3><span class="no">1</span>防止数据丢失：记底账，丢了你得知道</h3>
+  <p>这解决"信寄丢了没人发现"。两条措施：<b>把通知数据持久化到数据库</b>，并专门引入一个<b>通知日志数据库</b>——每个事件先落账，再上路；配套<b>重试机制</b>，投递失败就重新发。底账保"可追溯"，重试保"最终送达"。</p>
+
+  <h3><span class="no">2</span>去重：一封信只寄一遍</h3>
+  <p>这解决"同一封信寄了两遍，用户被轰炸"。给每个通知事件一个<b>事件 ID（event ID）</b>：事件到达时先查这个 ID——之前处理过就直接丢弃，没处理过才发送。实现的是<b>幂等</b>：重试多少次，用户也只收到一次。</p>
+
+  <h3><span class="no">3</span>通知模板：别每封信都现写</h3>
+  <p>这解决"每条通知现场拼装，又慢又不统一"。用<b>通知模板（notification template）</b>预格式化：正文骨架提前写好，留好变量占位，发送时往里填。生成一致，渲染也快。</p>
+
+  <h3><span class="no">4</span>通知设置：尊重"谢绝推销"</h3>
+  <p>这解决"用户明明不想要还在收"。用户可以对每个渠道——推送、短信、邮件——单独选择接收或退订，选择存进专门的<b>通知设置表</b>。发送前先查这张表，用户关掉的渠道就不发。</p>
+
+  <h3><span class="no">5</span>限流：一夜 50 条推送就是骚扰</h3>
+  <p>这解决"某个用户短时间被密集轰炸"。<b>限流（Rate Limiting）</b>限制发给单个用户的通知频率，超过上限就压后或丢弃。它是不扰民的最后防线。</p>
+
+  <h3><span class="no">6</span>重试机制：投递公司偶尔失手</h3>
+  <p>这解决"第三方服务失败，信中途掉了"。第三方失败就<b>重试（retry）</b>。工程上要配次数上限和退避间隔：对方故障时无脑猛刷，既会把对方打挂，也会把自己的队列堵死。</p>
+
+  <h3><span class="no">7</span>监控队列：别让信堵死在传送带上</h3>
+  <p>这解决"信全堵在队列里没人看见"。持续跟踪<b>已排队的通知</b>：队列变长就动态加工作线程，队列空了再减。这是工作线程自动伸缩的依据，也是队列从"缓冲"变"堰塞湖"前的警报器。</p>
+
+  <h3><span class="no">8</span>事件追踪：发出去不能两眼一抹黑</h3>
+  <p>这解决"发了 1600 万条，效果为零还是为零，不知道"。<b>事件追踪（events tracking）</b>收集打开率、点击率、用户参与度等指标：既验证投递质量，也给限流阈值和模板调优提供数据。</p>
+
+  <h3><span class="no">9</span>安全性：发送 API 不能裸奔</h3>
+  <p>这解决"谁都能调你的发送接口群发垃圾"。用 <b>AppKey</b> 和 <b>AppSecret</b> 给推送通知的 API 做身份验证和保护——相当于 API 的账号密码，调用方先验明正身才能发信。</p>
+
+  <h3><span class="no">10</span>通知流程：五步走完一封信</h3>
+  <p>把前面的零件串起来，一封信的完整旅程：</p>
+  <ol class="steps">
+    <li>触发服务调用 API 发送通知。</li>
+    <li>通知服务器校验请求，从缓存或数据库中获取元数据。</li>
+    <li>通知事件被发送到消息队列。</li>
+    <li>工作线程处理事件，并与第三方服务交互。</li>
+    <li>第三方服务将通知投递给用户。</li>
+  </ol>
+
+  <h3><span class="no">11</span>关键优化：四个加码</h3>
+  <p>原文收尾给了四个优化方向。<b>水平扩展</b>：加更多通知服务器分担负载；<b>消息队列</b>：解耦各组件，应对高并发量；<b>缓存</b>：频繁访问的数据（联系方式、设置、模板）放内存，降低延迟；<b>分布式投递</b>：在地理上优化投递位置，离用户更近，性能更好。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>一台通知服务器扛全场就是<b>单点故障（SPOF）</b>，它一挂全系统瘫痪；数据库、缓存不分离，谁也独立扩不了。</li>
+      <li>发通知是资源大户，和处理逻辑挤一台机器，性能瓶颈必现——第一版设计的三个坑是连着的。</li>
+      <li>第三方投递公司不受你控制：它挂了、限流了，你只能靠重试；而重试没有上限和退避，会适得其反。</li>
+      <li>队列能削峰，但<b>监控不到位，信会无声无息堵死在队列里</b>——监控队列不是可选项。</li>
+      <li>"不丢"和"不重"是一对矛盾：持久化＋重试保不丢，事件 ID 去重保不重，<b>只重试不去重，用户会被同一封信轰炸。</b></li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>一条流水线：触发 → 校验取数 → 入队 → 工作线程 → 第三方投递；<b>队列负责削峰，worker 负责跑腿。</b></li>
+      <li>不丢靠通知日志＋重试，不重靠事件 ID 去重，不扰民靠通知设置＋限流。</li>
+      <li>通知服务器要无状态、水平扩展；数据库和缓存早早分离出去，别一台机器扛全部。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../10.%20Notification%20System/Readme.zh-CN.md">10. Notification System/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="09.html"><span>上一讲</span>09 →</a>
+  <a class="next" href="11.html"><span>下一讲</span>11 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

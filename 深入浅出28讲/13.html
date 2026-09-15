@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第13讲 · 搜索补全：猜你想搜的目录树</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g3">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 13 讲 · 搜索补全：猜你想搜的目录树</span>
+  <a href="12.html">← 上一讲 12</a>
+  <a href="14.html">下一讲 14 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 13 讲 / 共 28 讲 · 第三阶段「搭系统」</div>
+  <h1>搜索补全：猜你想搜的目录树</h1>
+  <div class="en">Search Autocomplete · 猜你想搜</div>
+  <p class="one"><b>一句话：</b>刚敲两个字母就猜出你想搜什么，100 毫秒内给出答案。</p>
+  <div class="stats">
+    <span class="stat">结果：最多 5 条，按热度排序</span>
+    <span class="stat">规模：1000 万 DAU · 峰值 QPS 48,000</span>
+    <span class="stat">延迟：&lt; 100 ms</span>
+    <span class="stat">数据增长：约 0.4 GB / 天</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">老字典</span>用一本厚词典查词：先按拼音翻到「T」部，再翻到「tw」那一页——页眉上早就印着这一页最常见的五个词。查的人根本不用把整本词典翻一遍。搜索补全就是那本词典：<b>字典树（Trie）就是按前缀排好的书页，每个节点上预先印好的热门 top 5，就是答案。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>自动补全（Autocomplete），也叫即时提示（typeahead）或增量搜索（incremental search）：用户边敲键盘，系统边给出建议。它要解决的真正难题是：<b>历史查询数以亿计，怎么在 100 毫秒内，根据两三个字母返回「最热门的前 5 条」？</b></p>
+  <p>面试里先钉死需求：</p>
+  <ol class="clean">
+    <li><b>实时建议：</b>输入的同时展示匹配结果，每敲一个字母都可能触发一次查询。</li>
+    <li><b>Top-k 结果：</b>最多返回 5 条，按查询热度（频率）排序。</li>
+    <li><b>可扩展：</b>扛住 1000 万 DAU，峰值 QPS 48,000。</li>
+    <li><b>高可用：</b>出故障不停机。</li>
+  </ol>
+  <p>规模假设与估算，全部来自原文：</p>
+  <table class="num">
+    <tr><th>指标</th><th>数值</th><th>说明</th></tr>
+    <tr><td>DAU</td><td>1000 万</td><td>每日活跃用户</td></tr>
+    <tr><td>峰值 QPS</td><td>48,000</td><td>查询服务的峰值流量</td></tr>
+    <tr><td>每次返回</td><td>最多 5 条</td><td>top-k，k=5</td></tr>
+    <tr><td>响应时间</td><td>&lt; 100 ms</td><td>硬性延迟要求</td></tr>
+    <tr><td>数据增长</td><td>约 0.4 GB / 天</td><td>新查询数据的存储增量</td></tr>
+    <tr><td>字符集</td><td>仅小写英文</td><td>简化版假设（高级特性再扩到 Unicode）</td></tr>
+  </table>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>高层看，系统拆成两个服务：一个管「学」，一个管「猜」。请求和数据这样流动：</p>
+  <div class="flow">
+    <span class="node">用户输入</span><span class="arrow">→</span>
+    <span class="node">查询服务 Query Service</span><span class="arrow">→</span>
+    <span class="node">字典树缓存 Trie Cache</span><span class="arrow">→</span>
+    <span class="node">top 5 建议</span>
+  </div>
+  <div class="flow">
+    <span class="node">用户查询</span><span class="arrow">→</span>
+    <span class="node">分析日志 Analytics Logs</span><span class="arrow">→</span>
+    <span class="node">聚合器 Aggregators</span><span class="arrow">→</span>
+    <span class="node">频率表</span><span class="arrow">→</span>
+    <span class="node">工作进程 Workers</span><span class="arrow">→</span>
+    <span class="node">字典树 Trie / 字典树数据库 Trie DB</span>
+  </div>
+  <p>上面那条是读路径：用户每敲一个字母，查询服务拿着前缀去字典树里取 top 5，靠缓存和高效数据结构保证毫秒级返回。下面那条是写路径：原始查询先落进只追加的分析日志，每周聚合一次，重建出新的字典树。两条路一快一慢、互不拖累——<b>为什么分两路？因为用户每天可能输入数十亿条查询，每条都实时更新字典树根本行不通；而且字典树一旦建好，热门建议也不会有大变化。</b>「实时全量更新」作为起点可以，作为终案不行。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文第 1–5 节的顺序）</h2>
+
+  <h3><span class="no">1</span>字典树数据结构：按前缀排好的书页</h3>
+  <p>这解决「怎么存」的问题。字典树（Trie，前缀树）是一棵树，用来高效地存储和检索查询字符串。两个关键特性：<b>紧凑存储</b>——以层次化方式表示前缀，最大限度减少冗余，共用的前缀只存一份；<b>频率信息</b>——每个节点都存着这个前缀本身被搜过多少次（热度）。</p>
+  <p>拿到「tw」，取 top 5 的三步：① 找到前缀节点；② 从这个节点出发遍历子树，收齐所有有效的子节点；③ 按频率排序，取前 k 条。比如输入 <code>tw</code>，就返回被搜得最多的前 5 条查询。</p>
+  <p>两个优化让它真正可用：<b>每个节点缓存 top-k 查询</b>——答案预先算好存在节点里，查询时不必遍历整棵树，这是快过 100 毫秒的关键；<b>限制前缀长度</b>——用户很少输入很长的查询（比如 50 个字符），把搜索空间限定住。</p>
+  <p>三种操作：<b>创建</b>，每周用聚合后的查询数据构建一次，数据来自分析日志或数据库；<b>更新</b>，很少实时更新，每周的构建会直接替换旧数据；<b>删除</b>，靠一个<b>过滤层</b>——它按规则移除不需要或有危害的建议（比如仇恨言论），有了这一层，换过滤规则就能灵活地摘掉结果，被摘掉的内容会异步地从数据库中物理删除。</p>
+
+  <h3><span class="no">2</span>查询处理流程：三步走完一次请求</h3>
+  <p>这解决「怎么查」的问题。一次请求在查询服务里走三步：<b>前缀搜索</b>——定位与用户输入对应的前缀节点，遍历子树收集有效建议；<b>Top-k 排序</b>——因为每个节点都缓存了 top-k 建议，排序开销被压到最小；<b>响应构造</b>——直接用缓存数据拼出结果。整条路径上没有一步需要现算，全是「取」。这就是低延迟的来源。</p>
+
+  <h3><span class="no">3</span>优化：能预取就不现算</h3>
+  <p>这解决「怎么更快」的问题，四板斧：<b>每个节点缓存</b>——存 top-k 查询，避免冗余遍历整棵子树；<b>限制前缀长度</b>——压到约 50 个字符，缩小搜索空间，加快查找；<b>AJAX 请求</b>——用轻量级异步请求实现实时响应，页面不刷新；<b>浏览器缓存</b>——对频繁搜索的词，把补全结果直接存在浏览器里，连后端都不用惊动。</p>
+
+  <h3><span class="no">4</span>数据收集流水线：慢车道，每周跑一趟</h3>
+  <p>这解决「热度数据从哪来」的问题。先说为什么不能实时：用户每天可能输入数十亿条查询，每条都更新字典树行不通；而且字典树建好后，热门建议本来就不会大动。更新后的设计四个零件：<b>分析日志（Analytics Logs）</b>——原始查询以日志形式存下来，留给每周聚合；日志只追加（append-only），不建索引，写起来最便宜。<b>聚合器（Aggregators）</b>——把日志处理成频率表，供构建字典树用；像 Twitter 这样对实时性敏感的应用可以缩短聚合间隔，其他场景每周一次就够。<b>工作进程（Workers）</b>——异步服务器，负责重建字典树并把它存进持久化存储，重建期间线上服务照常读旧树。<b>存储选项</b>——读走<b>字典树缓存（Trie Cache）</b>，一个分布式缓存系统，把字典树放在内存里快速读取；持久层是<b>字典树数据库（Trie DB）</b>，两条路：用文档存储（如 MongoDB）给每周新建的字典树做快照、序列化后存进去；或者用键值存储，把每个前缀映射为哈希表里的一个键、节点上的数据映射为对应的值，前缀即键、节点即值，查找最快。</p>
+
+  <h3><span class="no">5</span>可扩展性：一棵树太大，就按前缀切开</h3>
+  <p>这解决「一台机器装不下」的问题。<b>分片（Sharding）</b>——按前缀范围把字典树节点分布到各服务器，比如 <code>a-m</code> 一台、<code>n-z</code> 一台；发现某段特别热，就在前缀内进一步分片来平衡不均匀的分布，比如 <code>aa-ag</code>、<code>ah-an</code> 再拆开。<b>负载均衡</b>——用<b>分片映射管理器（shard map manager）</b>把请求路由到正确的服务器：请求进来先拆出前缀，查映射表，再转给持有那一段分片的服务器。分片键天然就是前缀，不用再发明一套。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>「每敲一条查询就实时更新字典树」听着优雅，实际<b>每天数十亿条查询</b>，每条都动一次树，谁也扛不住——只能走日志加每周聚合的慢车道。</li>
+      <li>每周重建意味着热度有延迟：今天刚火起来的新词，可能要等下一轮聚合和重建才进得了建议。实时场景（如 Twitter）得改用更短的聚合间隔，代价是流水线更忙。</li>
+      <li>前缀分片注定<b>分布不均</b>：a–m 和 n–z 的查询热度天差地别，必须在前缀内再细分片；分片映射管理器自己也是个要害，它挂了请求就不知道该去哪台机器。</li>
+      <li>过滤层只能摘掉「建议」，有害内容还要靠<b>异步物理删除</b>真正从数据库里清掉，否则字典树里还留着。</li>
+      <li>浏览器缓存、字典树缓存、每周重建的持久层是三本账，各自有新鲜度窗口，热点排序偶尔「滞后」是常态，不是 bug。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>快的秘密不是算法快，是<b>把答案预先算好存在每个节点里</b>——查询只做「取」，不做「算」。</li>
+      <li>写入永远走「日志 → 聚合 → 异步重建」的慢车道，读才走内存缓存的快车道，两条路分开。</li>
+      <li>前缀既是被查的键，也是分片的依据——选对前缀范围，就是选对负载。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../13.%20Search%20Autocomplete/Readme.zh-CN.md">13. Search Autocomplete/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="12.html"><span>上一讲</span>12 · 聊天系统：一直接通不挂的电话</a>
+  <a class="next" href="14.html"><span>下一讲</span>14 · YouTube：视频的搬运与变身 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

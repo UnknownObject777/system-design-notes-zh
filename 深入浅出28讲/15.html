@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第15讲 · 网盘：切块、去重、同步</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g3">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 15 讲 · 网盘：切块、去重、同步</span>
+  <a href="14.html">← 上一讲 14</a>
+  <a href="16.html">下一讲 16 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 15 讲 / 共 28 讲 · 第三阶段「搭系统」</div>
+  <h1>网盘：切块、去重、同步</h1>
+  <div class="en">Google Drive · 云文件存储与同步</div>
+  <p class="one"><b>一句话：</b>手机改了，电脑立刻看到，而且只传改动的部分。这一讲看 Google Drive 怎么用三招兑现这个承诺：切块、去重、增量同步。</p>
+  <div class="stats">
+    <span class="stat">规模：1000 万 DAU</span>
+    <span class="stat">免费空间：10 GB / 人 · 单文件上限 10 GB</span>
+    <span class="stat">总存储：500 PB</span>
+    <span class="stat">块大小：≤ 4 MB</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">乐高仓库</span>把一个文件想象成一堵乐高墙。上传时拆成标准小块，每块按"指纹"编号后送进仓库；指纹相同的小块只存一份——你和同事各存了一份一模一样的合同，仓库里也只占一格。墙后来改了几块，就只需要补那几块，不用把整面墙重新寄一遍。<b>切块、去重、增量同步，这三招全在这堵墙里。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>这一讲要造的不是"能存文件的网盘"——那只是个 U 盘。真正难的是：<b>手机、电脑、平板上的同一份文件，任何一端改动，其余设备尽快看到，而且只传改动的部分。</b>这是面试里"设计 Google Drive"的标准题面，也是日常用网盘时觉得理所当然、实现起来却处处是坑的需求。</p>
+  <p>功能需求，五条：</p>
+  <ol class="clean">
+    <li>上传和下载文件。</li>
+    <li>在多个设备之间同步文件。</li>
+    <li>维护文件修订版本。</li>
+    <li>支持带权限的文件共享。</li>
+    <li>文件被编辑、删除、共享时发送通知。</li>
+  </ol>
+  <p>非功能需求，五条：可靠性（数据丢失不可接受）、同步速度快（别让延迟磨掉用户的耐心）、带宽效率（少传不必要的数据）、可扩展（支撑 1000 万日活跃用户）、高可用（服务器故障或网络问题时照常运行）。</p>
+  <p>约束与假设，估算的原料：</p>
+  <table class="num">
+    <tr><th>假设</th><th>数值</th></tr>
+    <tr><td>每用户免费空间</td><td>10 GB</td></tr>
+    <tr><td>单文件大小上限</td><td>10 GB</td></tr>
+    <tr><td>平均上传大小</td><td>500 KB</td></tr>
+    <tr><td>上传频率</td><td>每人每天 2 个文件</td></tr>
+    <tr><td>总存储需求</td><td>500 PB</td></tr>
+  </table>
+  <p>注意这组数字里的矛盾：上限是 10 GB 的大家伙，平均却只有 500 KB。系统既要扛得住偶尔的大文件，又要让海量小文件的同步飞快。<b>这个矛盾就是后面所有设计的出发点。</b></p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>先看单服务器方案这个起点：一台 Web 服务器管上传下载，一个元数据数据库记用户、登录和文件信息，再加一个按命名空间（namespace）组织的存储目录——每个用户一个目录，文件用"命名空间 + 相对路径"唯一标识。能跑，但只是起点，撑不起规模。</p>
+  <p>于是转向分布式，四步改进：按 <code>user_id</code> 分片（Sharding），把存储拆到多台服务器；文件块放进 Amazon S3，可扩展、自带冗余、支持跨区域复制；流量前面架负载均衡器；元数据数据库也做分片和复制保可用性。</p>
+  <p>对外接口很朴素，三个 API：上传分两种——小文件走简单上传，大文件走<b>可断点续传上传（Resumable upload）</b>：先发初始请求换一个可续传 URL，传数据并监控状态，断了就从断点接着传；下载走 <code>/files/download</code>；修订历史走 <code>/files/list_revisions</code>。</p>
+  <p>改进后的系统，数据这样流动：</p>
+  <div class="flow">
+    <span class="node">客户端（浏览器 / App）</span><span class="arrow">→</span>
+    <span class="node">负载均衡器</span><span class="arrow">→</span>
+    <span class="node">API 服务器（认证 · 元数据）</span><span class="arrow">→</span>
+    <span class="node">元数据数据库 + 缓存</span>
+  </div>
+  <div class="flow">
+    <span class="node">块服务器（切块 · 压缩 · 加密）</span><span class="arrow">→</span>
+    <span class="node">云存储 S3</span><span class="arrow">→</span>
+    <span class="node">冷存储 Glacier</span>
+  </div>
+  <div class="flow">
+    <span class="node">通知服务（发布/订阅 · 长轮询）</span><span class="arrow">→</span>
+    <span class="node">客户端</span><span class="arrow">·</span>
+    <span class="node">离线备份队列</span>
+  </div>
+  <p>模块为什么这样分：<b>元数据</b>（谁拥有哪个文件、由哪些块组成、有哪些版本）小而热，走数据库加缓存，谁查都飞快；<b>文件块</b>大而冷，走块服务器进 S3，不活跃再降进冷存储省钱。两者拆开，才能各自扩容、各自优化。通知服务独立成发布/订阅系统，因为新增、编辑、删除都要实时推到所有相关客户端；离线备份队列给掉线的客户端暂存变更，重新上线再补拉。</p>
+  <p>还有一朵绕不开的乌云：两人同时改同一个文件，就撞<b>同步冲突</b>——只有一个版本能先被处理，另一个只能交给用户定夺。冲突怎么解，放在第三步细说。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文深入设计各节的顺序）</h2>
+
+  <h3><span class="no">1</span>元数据数据库：小账本管大仓库</h3>
+  <p>文件内容（块）存在 S3，但"哪个文件属于谁、由哪些块组成、有哪些历史版本"这些小巧而查询频繁的信息，得有一套能快速读写的结构。原文给的是高度简化版，只留最重要的四张表：</p>
+  <table class="num">
+    <tr><th>表</th><th>存什么</th><th>为什么需要</th></tr>
+    <tr><td>用户表（User Table）</td><td>用户资料和偏好设置</td><td>每个账号一份档案</td></tr>
+    <tr><td>文件表（File Table）</td><td>文件元数据：大小、名称、路径</td><td>知道"哪个文件在哪"</td></tr>
+    <tr><td>块表（Block Table）</td><td>文件由哪些块组成</td><td>重建文件时按序拼接</td></tr>
+    <tr><td>文件版本表（File Version Table）</td><td>文件的修订历史</td><td>回滚和冲突处理都靠它</td></tr>
+  </table>
+  <p>频繁访问的元数据进缓存，检索更快——账本很小，但翻得极勤。</p>
+
+  <h3><span class="no">2</span>文件上传流程：先记账，后盖棺</h3>
+  <p>大文件上传最怕两件事：传到一半断了；以及"元数据说传完了，块其实没到"。上传流程用三步步调加两个状态解决：</p>
+  <ol class="clean">
+    <li><b>文件上传</b>：块服务器把文件拆成块、压缩并加密，块上传后存进 S3。</li>
+    <li><b>元数据上传</b>：客户端把元数据发给 API 服务器，先以 <code>pending</code>（待处理）状态入库。</li>
+    <li><b>完成</b>：S3 触发回调，把文件状态更新为 <code>uploaded</code>（已上传）；通知服务告知相关用户。</li>
+  </ol>
+  <p><code>pending</code> 到 <code>uploaded</code> 这个状态机是防"半成品"的闸：只有 S3 确认块齐了，文件才算真正存在。再配合第二步说的可断点续传上传（Resumable upload）——先发初始请求换一个可续传 URL，网络断了从断点接着传——10 GB 的大文件在弱网里才传得完。</p>
+
+  <h3><span class="no">3</span>文件同步：只补那几块</h3>
+  <p>同步要解决的核心矛盾：在手机上改了一个字，电脑不能重传整个 500 MB 的 PPT。三招：</p>
+  <ol class="clean">
+    <li><b>增量同步（Delta Sync）</b>：只传输被修改的块，而不是整个文件。</li>
+    <li><b>压缩</b>：块按文件类型选用相应的压缩算法。</li>
+    <li><b>冲突解决</b>：两人同时改同一文件，先被处理的版本胜出；输掉的版本不丢，分开保存，由用户选择合并，或用一个版本覆盖另一个。</li>
+  </ol>
+  <p>一句话：切块是地基，增量同步和去重都是盖在它上面的楼。</p>
+
+  <h3><span class="no">4</span>文件下载流程：先听说，再取货</h3>
+  <p>别的设备改了文件，这台怎么知道、又怎么拿到？先说"怎么知道"，分两种情况：</p>
+  <ul class="clean">
+    <li>客户端 A 在线：文件被另一台客户端修改时，通知服务直接推给 A。</li>
+    <li>客户端 A 离线：变更先存进缓存（离线备份队列），A 重新上线时拉取最新的变更。</li>
+  </ul>
+  <p>知道后走三步：<b>触发</b>——通知服务告知客户端文件更新；<b>获取元数据</b>——客户端通过 API 服务器检索更新后的元数据；<b>下载块</b>——客户端从块服务器下载更新后的块，按顺序重建文件。</p>
+
+  <h3><span class="no">5</span>通知服务：多设备之间的传令兵</h3>
+  <p>手机改了电脑立刻看到，"立刻"两个字就靠它。通知服务是一个<b>发布/订阅系统</b>，用<b>长轮询（long polling）</b>做异步通知：文件被新增、编辑或删除时，通知推送到所有相关客户端。没有它，每台设备只能不停刷新问"有变化吗"——带宽和延迟都受不了。</p>
+
+  <h3><span class="no">6</span>存储优化：500 PB 的账单</h3>
+  <p>500 PB 不是形容词，是账单。三招省钱：</p>
+  <ol class="clean">
+    <li><b>去重（De-duplication）</b>：按哈希比较，在账号级别移除重复的块——你存了两份一模一样的文件，仓库里只有一份块。</li>
+    <li><b>版本控制策略</b>：限制保存的修订版本数量；频繁编辑的文件，优先保留最近的版本。</li>
+    <li><b>冷存储</b>：很少访问的文件挪去更便宜的存储方案，例如 Amazon S3 Glacier。</li>
+  </ol>
+
+  <h3><span class="no">7</span>故障处理：零件总会坏</h3>
+  <p>1000 万 DAU 的系统里，任何零件都会坏。设计时就得把"坏了怎么办"写死：</p>
+  <ul class="clean">
+    <li><b>负载均衡器故障</b>：备用负载均衡器接管。</li>
+    <li><b>块服务器故障</b>：待处理的任务重新分配给其他服务器。</li>
+    <li><b>元数据数据库故障</b>：把某个从节点提升为主节点，流量重定向到剩余的副本。</li>
+    <li><b>云存储故障</b>：用跨区域复制获取不可用的文件。</li>
+    <li><b>通知服务故障</b>：客户端重新连接到备用服务器。</li>
+  </ul>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>同步冲突躲不掉：两人同时改同一文件，只有一个版本能赢，另一个得用户自己合并或覆盖——系统不替你做这个决定。</li>
+      <li>数据丢失不可接受，是写死的底线：块要跨区域复制，元数据数据库要分片加复制；它一挂，上传下载全部停摆。</li>
+      <li>版本历史不是免费的：不限数量、不进冷存储、不去重，500 PB 的存储成本会失控。</li>
+      <li>同步是"最后一公里"问题：通知服务或离线队列出毛病，客户端就拿不到变更，"手机改了电脑立刻看到"的承诺当场破功。</li>
+      <li>单服务器方案（一台 Web 服务器加一个目录）看起来能跑，但命名空间摆得再整齐，也撑不起 1000 万 DAU。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>文件切成 ≤4 MB 的块：<b>增量同步、去重、断点续传</b>三件事都建立在块上。</li>
+      <li>元数据和大块数据分家：前者走数据库加缓存，后者走 S3 加冷存储，各自扩容。</li>
+      <li>多设备一致靠通知服务（长轮询）加离线队列；冲突时先处理的赢，剩下的交给用户。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../15.%20Google%20Drive/Readme.zh-CN.md">15. Google Drive/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="14.html"><span>上一讲</span>14 →</a>
+  <a class="next" href="16.html"><span>下一讲</span>16 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

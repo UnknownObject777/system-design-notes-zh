@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第11讲 · 信息流：朋友圈怎么送达</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g3">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 11 讲 · 信息流：朋友圈怎么送达</span>
+  <a href="10.html">← 上一讲 10</a>
+  <a href="12.html">下一讲 12 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 11 讲 / 共 28 讲 · 第三阶段「搭系统」</div>
+  <h1>信息流：朋友圈怎么送达</h1>
+  <div class="en">News Feed System</div>
+  <p class="one"><b>一句话：</b>你发了帖子，好友的动态页怎么立刻出现它。发出去只是存一条数据，难的是把它"扇出"到几千个好友的首页——这一讲拆解 Facebook / Instagram / Twitter 时间线背后的两条流水线。</p>
+  <div class="stats">
+    <span class="stat">规模：1000 万日活（DAU）</span>
+    <span class="stat">好友上限：5,000 人</span>
+    <span class="stat">排序：逆时间序</span>
+    <span class="stat">缓存：五层分工</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">小区公告栏</span>你写了一则便条，交给小区物业（发帖）。物业把它复印成很多份，贴到每位好友楼下的公告栏上（扇出）——这叫"送上门"。早高峰大家出门，顺手看一眼自家公告栏最新的几条，就是刷信息流。可小区里有一位大明星，几万粉丝都贴满？物业会贴不起。于是对明星只在他自己楼下贴一份原件，谁想看谁自己跑一趟（拉取）。<b>整个新闻流系统，就是把"复印贴条"这件事做成每秒几万次还不出错的工程。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>目标是设计一个<b>信息流系统（News Feed System）</b>：持续展示来自社交关系的更新（状态、照片、视频、链接），比如 Facebook 的信息流、Instagram 的信息流、Twitter 的时间线。面试里先把需求钉死：</p>
+  <ol class="clean">
+    <li><b>平台：</b>Web 端和移动端 App 都要支持。</li>
+    <li><b>功能：</b>用户能发帖子；用户能在自己的信息流里看到好友发的帖子。</li>
+    <li><b>排序：</b>为了简单，按<b>逆时间顺序（reverse chronological order）</b>排，新的在前。</li>
+    <li><b>内容：</b>帖子里可以带文本、图片和视频。</li>
+  </ol>
+  <p>规模假设：</p>
+  <table class="num">
+    <tr><th>指标</th><th>假设</th></tr>
+    <tr><td>日活跃用户（DAU）</td><td>1000 万</td></tr>
+    <tr><td>单个用户好友上限</td><td>5,000 人</td></tr>
+    <tr><td>排序方式</td><td>逆时间序</td></tr>
+    <tr><td>帖子内容类型</td><td>文本 / 图片 / 视频</td></tr>
+  </table>
+  <p>注意这个数字组合有多狠：一个用户发帖，理论上要触达最多 5,000 个好友的首页。日活千万意味着"刷"的请求量是"发"的很多倍——这个不对称，直接决定了后面的架构走向。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>高层设计里有<b>两条独立的流水线</b>：一条负责"发"（写入），一条负责"刷"（读取）。先把它们分开，是这一类系统最重要的直觉。</p>
+  <p><b>流水线一：信息流发布（Feed Publishing）</b>——你点了"发布"之后：</p>
+  <div class="flow">
+    <span class="node">用户</span><span class="arrow">→</span>
+    <span class="node">负载均衡器</span><span class="arrow">→</span>
+    <span class="node">Web 服务器（认证）</span><span class="arrow">→</span>
+    <span class="node">帖子服务</span><span class="arrow">→</span>
+    <span class="node">数据库 + 缓存</span><span class="arrow">→</span>
+    <span class="node">扇出服务 → 好友的信息流缓存</span><span class="arrow">→</span>
+    <span class="node">通知服务</span>
+  </div>
+  <p><b>流水线二：信息流构建（News Feed Building）</b>——你打开 App 刷新时：</p>
+  <div class="flow">
+    <span class="node">用户</span><span class="arrow">→</span>
+    <span class="node">负载均衡器</span><span class="arrow">→</span>
+    <span class="node">Web 服务器</span><span class="arrow">→</span>
+    <span class="node">信息流服务</span><span class="arrow">→</span>
+    <span class="node">信息流缓存（拿帖子 ID）</span><span class="arrow">→</span>
+    <span class="node">数据库 / 缓存（拿帖子详情）</span>
+  </div>
+  <p>两条流水线靠 API 划界：发布走 <code>POST /v1/me/feed</code>（参数是 <code>content</code> 和身份令牌 <code>auth_token</code>），检索走 <code>GET /v1/me/feed</code>。为什么要分成"扇出写入"和"按 ID 现取"两段？因为读的频率远高于写：把"组装好友帖子"的活提前在写入时干完，读取时就只剩一次缓存查找——用写方的成本，换读方的速度。扇出服务（Fanout Service）和五层缓存，就是为这个分工而生的零件。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文顺序）</h2>
+
+  <h3><span class="no">1</span>Web 服务器：先验身份，再掐垃圾</h3>
+  <p>这是发布流水线的第一道门，解决"这请求可信吗"的问题。两件事：用 <code>auth_token</code> 对发帖人做身份认证；然后实施<b>速率限制（rate limit）</b>，防止有人刷垃圾信息把扇出服务打爆。认证和限流放在 Web 层，后面的服务就能假定进来的请求都是干净、有主的。</p>
+
+  <h3><span class="no">2</span>扇出服务：推，还是拉？</h3>
+  <p>这是本讲的灵魂问题：你发的帖子，什么时候出现在好友的信息流里？三种方案，各有取舍：</p>
+  <ul class="clean">
+    <li><b>写时扇出（Fanout on Write）：</b>发帖那一刻，就推送（push）到所有好友的信息流缓存。<b>优点：</b>实时更新，刷的时候检索飞快。<b>缺点：</b>好友多的用户发帖，资源开销巨大——大明星一条帖子要写入几万份缓存。</li>
+    <li><b>读时扇出（Fanout on Read）：</b>发帖只存一处；好友刷新时，才现拉（pull）他关注的人的帖子，现场聚合。<b>优点：</b>不活跃用户不占资源，发帖零扇出成本。<b>缺点：</b>信息流检索慢，刷一次要现场算。</li>
+    <li><b>混合方案（Hybrid Approach）：</b>大多数普通用户用推送模型；对拥有大量社交连接的用户（名人、大 V）改用拉取模型。这是大型社交网络的实际选择——把贵的操作留给少数能扛的人。</li>
+  </ul>
+
+  <h3><span class="no">3</span>扇出的五步流水线：一份帖子如何复制五千份</h3>
+  <p>扇出服务具体怎么干活？原文给了一条五步流水线：</p>
+  <ol class="clean">
+    <li><b>获取好友 ID：</b>从<b>图数据库（graph database）</b>里检索发帖人的好友列表。</li>
+    <li><b>从缓存中过滤好友：</b>查缓存里的用户设置，排除被屏蔽的好友、或按个人分享偏好不该看到的人。</li>
+    <li><b>发送到消息队列：</b>把过滤后的好友列表连同新帖子的 ID 一起丢进<b>消息队列（message queue）</b>，异步处理。</li>
+    <li><b>扇出工作进程（Fanout Workers）：</b>工作进程从队列取出任务，更新信息流缓存。关键细节：缓存里存的是 <code>&lt;post_id, user_id&gt;</code> 映射，<b>不是</b>完整的用户对象和帖子对象——为了省内存。</li>
+    <li><b>存储到信息流缓存：</b>把新帖子 ID 追加到每位好友的信息流缓存里。并且设一个可配置的上限，只保留最近的帖子——大多数用户只看最新内容，这样内存消耗始终可控。</li>
+  </ol>
+  <p>注意这里三个"为什么"：为什么要消息队列？发帖不能等五千次写缓存完成，入队即返回，削峰又解耦。为什么只存 ID？一份帖子详情几 KB，五千万份就是灾难，ID 只有几个字节。为什么设上限？信息流本质是"只看最新"，老帖子留在数据库，缓存只留热的那截。</p>
+
+  <h3><span class="no">4</span>信息流检索与五层缓存：各存各的，互不抢道</h3>
+  <p>读取侧（刷信息流）的性能，几乎全靠缓存架构撑起来。原文把它分成五层，每层只干一件事：</p>
+  <table class="num">
+    <tr><th>缓存层</th><th>存什么</th><th>为什么单独一层</th></tr>
+    <tr><td>信息流缓存（News Feed Cache）</td><td>帖子 ID 列表</td><td>刷信息流先拿 ID，最快</td></tr>
+    <tr><td>内容缓存（Content Cache）</td><td>帖子详情，热门帖子放热缓存</td><td>按 ID 批量取详情，不碰数据库</td></tr>
+    <tr><td>社交图谱缓存（Social Graph Cache）</td><td>用户关系数据</td><td>扇出时要反复查好友关系</td></tr>
+    <tr><td>操作缓存（Action Cache）</td><td>用户操作：点赞、回复、分享</td><td>高频写，单独缓存缓冲</td></tr>
+    <tr><td>计数缓存（Counter Cache）</td><td>点赞数、回复数、粉丝数</td><td>数字更新极频繁，不能每次写库</td></tr>
+  </table>
+  <p>刷一次信息流的真实路径：信息流服务先从信息流缓存取回一页帖子 ID，再拿这批 ID 去内容缓存（和数据库兜底）取详情，拼装返回。五层分家的理由和第 1 讲的缓存道理一致：访问模式不同、失效策略不同，混在一起就会互相污染。</p>
+
+  <h3><span class="no">5</span>关键优化：跑得快、扛得住、看得见</h3>
+  <p>原文最后给了一盘"锦上添花"的优化清单，分四类：</p>
+  <ul class="clean">
+    <li><b>扩展性：</b>数据库水平扩展和<b>分片（sharding）</b>；用<b>只读副本（read replica）</b>扛高流量的读查询；Web 层保持<b>无状态</b>，随便加减机器。</li>
+    <li><b>缓存：</b>频繁访问的数据放内存；用多层缓存降延迟、减轻数据库负担。</li>
+    <li><b>可靠性：</b>用<b>一致性哈希（Consistent Hashing）</b>把请求均匀分到各服务器；消息队列解耦组件、缓冲突发流量。</li>
+    <li><b>监控：</b>盯 QPS（每秒查询数）和延迟；盯缓存命中率，低了就该调配置。</li>
+  </ul>
+  <p>这四类没有一项是"新零件"，全是前 10 讲的工具在这里落地：分片和无状态来自第 1 讲，一致性哈希是第 5 讲，消息队列、限流、监控也各有专章。信息流系统的难点不在零件新，而在把它们缝成两条不互相拖累的流水线。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>纯推送模型对<b>大明星用户</b>是灾难：一条帖子扇出几万份缓存，写时扇出（Fanout on Write）的成本和好友数成正比。</li>
+      <li>纯拉取模型对<b>活跃用户</b>是折磨：每次刷新都要现场聚合，读时扇出（Fanout on Read）的检索速度上不去。</li>
+      <li>混合方案不是免费午餐：同一条信息流里，普通好友的帖子是推来的、名人的帖子是拉来的，两套逻辑要在一页里合并排序，复杂度转移到了读取侧。</li>
+      <li>信息流缓存只存 <code>&lt;post_id, user_id&gt;</code> 且只留最近一段——一旦上限、失效策略没调好，用户会看到"信息流断层"，而数据库本身没问题。</li>
+      <li>过滤（屏蔽、隐私偏好）必须在扇出前做完：先扇出再删，等于白写几千份缓存。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>信息流系统拆成两条流水线：<b>发布（写时扇出）</b>和<b>构建（按 ID 现取）</b>——用写方的成本，换读方的速度。</li>
+      <li>扇出没有完美方案：普通人用<b>推（Fanout on Write）</b>，名人用<b>拉（Fanout on Read）</b>，混合落地。</li>
+      <li>缓存存 <code>&lt;post_id, user_id&gt;</code> 映射，五层分工——内存寸土寸金，别让完整对象进信息流缓存。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../11.%20News%20Feed%20System/Readme.zh-CN.md">11. News Feed System/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="10.html"><span>上一讲</span>10 · 通知系统 ←</a>
+  <a class="next" href="12.html"><span>下一讲</span>12 · 聊天系统 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第26讲 · 支付系统：一分钱都不能错</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g5">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 26 讲 · 支付系统：一分钱都不能错</span>
+  <span><a href="25.html">← 上一讲 25</a> · <a href="27.html">下一讲 27 →</a></span>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 26 讲 / 共 28 讲 · 第五阶段「真金白银」</div>
+  <h1>支付系统：一分钱都不能错</h1>
+  <div class="en">Payment System</div>
+  <p class="one"><b>一句话：</b>收钱这件事，重来一百次也不能重复扣款。支付系统的吞吐量不大，但它有一个别的地方可以放松、这里绝对不行要求：钱账必须对得上，而且一笔支付只能被处理一次。</p>
+  <div class="stats">
+    <span class="stat">规模：每天 100 万笔交易</span>
+    <span class="stat">约每秒 10 笔（TPS 不是难点）</span>
+    <span class="stat">命门：幂等 + 对账 + 强一致</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">账房先生</span>你开了一家网店，但你不亲自碰钱箱，而是请了一位信得过的账房先生（PSP）：买家把钱交给账房，账房每收一笔都在两本账上同时记——"买家少了 100 元，你多了 100 元"，两本账加总永远是零；记完给你一张回执。月底你拿自己的账本和账房的底单逐笔核对，对不上的挑出来人工处理。<b>支付系统就是你和这位账房先生之间的那一整套规矩。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>这一讲设计的是一个<b>电商支付后端</b>，类似 Amazon 背后那套东西：处理与资金流动相关的一切。面试开头先问清楚边界：</p>
+  <ul class="clean">
+    <li><b>支付方式？</b>现实中信用卡、PayPal、银行卡都支持；面试里聚焦信用卡。</li>
+    <li><b>自己处理信用卡吗？</b>不，用第三方支付处理商（PSP），比如 Stripe、Braintree、Square。</li>
+    <li><b>自己存卡号吗？</b>不存。出于合规原因，卡数据全部交给 PSP。</li>
+    <li><b>全球多币种吗？</b>应用面向全球，但面试假设只用一种货币。</li>
+    <li><b>只收钱吗？</b>还要支持<b>付款流程</b>（比如每月给卖家打款），并且支持<b>对账（reconciliation）</b>，修复内外系统通信产生的不一致。</li>
+  </ul>
+  <p>需求归拢成两类：</p>
+  <ol class="clean">
+    <li><b>收款流程（pay-in）</b>——支付系统代表商户，从客户处接收资金。</li>
+    <li><b>付款流程（pay-out）</b>——支付系统向世界各地的卖家发送款项。</li>
+  </ol>
+  <p>非功能需求只有两条，但都很硬：<b>可靠性和容错</b>（失败的支付要被仔细处理，不能吞钱），以及<b>对账机制</b>（内外系统之间必须能对得上账）。</p>
+  <p>规模估算：</p>
+  <table class="num">
+    <tr><th>项目</th><th>数字</th><th>结论</th></tr>
+    <tr><td>每天支付交易量</td><td>100 万笔</td><td>摊到全天约每秒 10 笔</td></tr>
+    <tr><td>吞吐量压力</td><td>10 TPS</td><td>对任何数据库都不算高，不是本讲重点</td></tr>
+    <tr><td>真正的难点</td><td>—</td><td>强一致性：账不能错，钱不能重</td></tr>
+  </table>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>资金流里有三个角色：<b>买家</b>付钱，<b>电商网站</b>收钱，<b>PSP</b>负责真正在账户之间搬钱。一次收款（pay-in）这样流转：</p>
+  <div class="flow">
+    <span class="node">买家提交订单</span><span class="arrow">→</span>
+    <span class="node">支付服务 Payment Service</span><span class="arrow">→</span>
+    <span class="node">支付执行器 Payment Executor</span><span class="arrow">→</span>
+    <span class="node">PSP</span><span class="arrow">→</span>
+    <span class="node">卡组织 / 银行</span><span class="arrow">⇢</span>
+    <span class="node">钱包记余额</span><span class="arrow">+</span>
+    <span class="node">账本记流水</span>
+  </div>
+  <p>为什么拆成这几个零件？各自的存在理由：</p>
+  <ul class="clean">
+    <li><b>支付服务（Payment service）</b>——接受支付事件并协调整个过程，是前台接待。它还会调用第三方做风险检查，识别反洗钱（AML）违规。</li>
+    <li><b>支付执行器（Payment executor）</b>——通过 PSP 执行单个支付订单。一个支付事件里可能装多个订单（一单买多个卖家的货），所以需要这个专职跑腿的。</li>
+    <li><b>支付服务提供商（PSP）</b>——真正把钱从一个账户搬到另一个账户，比如从买家信用卡账户搬到电商的银行账户。</li>
+    <li><b>卡组织（Card schemes）</b>——处理信用卡业务的组织，比如 Visa、MasterCard。</li>
+    <li><b>账本（Ledger）</b>——记录所有支付交易的财务流水，审计和追责的依据。</li>
+    <li><b>钱包（Wallet）</b>——保存所有商户的账户余额，卖家到底有多少钱，以它为准。</li>
+  </ul>
+  <p><b>API</b>长这样：<code>POST /v1/payments</code> 收下 <code>buyer_info</code>、<code>credit_card_info</code> 和一组 <code>payment_orders</code>；每个支付订单里 <code>payment_order_id</code> 是全局唯一的，它会被转发给 PSP 用于去重——<b>它就是幂等键（idempotency key）</b>。金额字段是 <code>string</code> 而不是 <code>double</code>，因为浮点数不适合表示货币。再用 <code>GET /v1/payments/{:id}</code> 按 <code>payment_order_id</code> 查单笔支付的执行状态。</p>
+  <p><b>数据模型</b>就两张表。<code>payment_events</code>（<code>checkout_id</code> 主键、买家/卖家信息、卡信息、<code>is_payment_done</code>）和 <code>payment_orders</code>（<code>payment_order_id</code> 主键、金额、币种、外键 <code>checkout_id</code>、状态枚举 <code>NOT_STARTED / EXECUTING / SUCCESS / FAILED</code>，以及 <code>ledger_updated</code>、<code>wallet_updated</code> 两个记账标记）。一个事件挂多个订单；收款流程不需要 <code>seller_info</code>，付款流程才需要；状态流转由一个后台作业盯着，超时就告警。选数据库时不看性能、看<b>强一致性</b>——传统 SQL 有 ACID 保证、有成熟 DBA 人才、有金融机构使用记录，所以是不二之选。</p>
+  <p><b>复式记账（double-entry accounting）</b>是任何支付系统的命根子：每一笔资金操作同时落在两个账户上，一个账户借记（debit）减少、另一个贷记（credit）增加：</p>
+  <table class="num">
+    <tr><th>账户</th><th>借记</th><th>贷记</th></tr>
+    <tr><td>买家（buyer）</td><td>$1</td><td></td></tr>
+    <tr><td>卖家（seller）</td><td></td><td>$1</td></tr>
+  </table>
+  <p>所有交易条目的总和<b>始终为零</b>。这条铁律给系统里的每一笔资金流动提供了端到端的可追溯性——账永远轧得平。</p>
+  <p>最后两块拼图：<b>托管支付页面</b>——大多数公司不想碰卡数据、也不想背繁重的法规，于是用 PSP 提供的小组件替自己存储和处理信用卡支付；<b>付款流程（pay-out）</b>——组件和收款几乎一样，区别是资金反方向走（从电商银行账户到商户银行账户），可以借第三方应付账款提供商（如 Tipalti），记账和监管要求一样不少。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文 8 个小节的顺序）</h2>
+
+  <h3><span class="no">1</span>PSP 集成：两条接入路线</h3>
+  <p>解决什么问题：怎么把 PSP 接进来，同时避开"碰卡数据"的法规雷区。理论上可以直接连银行或卡组织、绕开 PSP，但这种连接极其罕见，只有能证明投资价值的大型公司才玩得起。现实路线二选一：<b>通过 API</b>（前提是敢自己收集支付信息），或者<b>通过托管支付页面</b>（法规问题全推给 PSP）。</p>
+  <p>托管页面的流程：用户点"结算"（checkout）→ 客户端把支付订单信息发给支付服务 → 支付服务向 PSP 发起支付注册，带上金额、币种、有效期和一个用于幂等的 UUID（就是支付订单的 UUID）→ PSP 返回一个令牌（token），存进支付服务数据库 → 用户看到 PSP 托管的支付页面，用令牌和成功/失败的重定向 URL 初始化 → 用户填卡，PSP 处理完把状态带在 redirectURL 上跳回来，同时通过 <b>webhook</b> 异步通知后端真正的支付结果。两条通道都通知，是因为同步跳转不可靠，异步回调才是准信。</p>
+
+  <h3><span class="no">2</span>对账（Reconciliation）： happy path 之外的兜底</h3>
+  <p>解决什么问题：成功路径（happy path）之外的失败，系统自己往往察觉不到——钱可能实际扣了，但我们的库里没记上。兜底的手段是<b>对账</b>：每天晚上 PSP 发来一份结算文件（settlement file），系统拿它把外部状态和内部状态逐笔比对。同一招也能抓内部不一致，比如账本服务和钱包服务之间的偏差。</p>
+  <p>比对出来的不匹配按三类处理：可分类且已知 → 用标准程序自动调整；可分类但无法自动化 → 财务团队手动调整；不可分类 → 财务团队人工调查。核心思想：每天一次、以账房的底单为准，把全天所有对不上的账都捞出来。</p>
+
+  <h3><span class="no">3</span>处理支付延迟：有些钱要几个小时才到账</h3>
+  <p>解决什么问题：一笔支付通常几秒钟完成，但有时要几个小时。两类常见原因：被标记为高风险，需要人工审查；或者信用卡要求 <b>3D Secure 身份验证</b>，持卡人得提供额外信息。</p>
+  <p>应对就两条：一是等 PSP 完成后发 webhook，没有 webhook 就主动轮询它的 API；二是产品上要诚实——给用户显示"处理中"（pending）状态，给一个能查看进度的页面，完成后发邮件通知。别把用户晾在转圈圈里。</p>
+
+  <h3><span class="no">4</span>内部服务通信：同步简单，异步自治</h3>
+  <p>解决什么问题：支付服务、执行器、账本、钱包之间怎么传话。两种模式。<b>同步（HTTP）</b>在小系统里好用，规模一大四个毛病全冒出来：性能低（调用链上每多一个服务，请求-响应周期就长一截）、故障隔离差（PSP 或任何一环挂了，用户拿不到响应）、强耦合（发送方得认识接收方）、难扩展（没有缓冲区，扛不住突发流量）。</p>
+  <p><b>异步</b>分两型：<b>单接收者</b>——多个接收者订同一个主题，但每条消息只被处理一次；<b>多接收者</b>——消息转发给所有订阅者。支付系统爱用后者，因为一笔支付会触发多个副作用（记账、更新钱包、发通知），由不同服务各自处理。一句话：同步更简单，但让服务无法自治；异步拿简单性和一致性，换可扩展和弹性。</p>
+
+  <h3><span class="no">5</span>处理失败的支付：重试队列与死信队列</h3>
+  <p>解决什么问题：支付是跨网络的调用，失败是常态，必须有一整套"失败之后怎么办"的流水线。三件武器：<b>跟踪支付状态</b>——每笔失败都能按状态决定是重试还是退款；<b>重试队列（retry queue）</b>——要重试的支付丢进去排队；<b>死信队列（dead-letter queue）</b>——最终失败的支付推进去，供人调试和检查。失败的支付不该悄悄消失，它要么翻身，要么进太平间等待验尸。</p>
+
+  <h3><span class="no">6</span>精确一次投递（Exactly-once delivery）：本讲的核心</h3>
+  <p>解决什么问题：一笔支付必须被<b>恰好处理一次</b>，否则就是向客户重复扣款。一个操作同时满足<b>至少一次（at-least-once）</b>和<b>至多一次（at-most-once）</b>，它就是精确一次的。至少一次靠重试：立即重试、固定间隔、递增间隔、<b>指数退避（exponential back-off）</b>（间隔每次翻倍），或者干脆取消。经验法则：默认用指数退避，并且让服务器用 <code>Retry-After</code> 响应头告诉客户端何时重试。</p>
+  <p>重试会引入一个致命风险：<b>服务器可能把一笔支付处理了两次</b>——用户连点两下"支付"按钮；或者 PSP 已经扣款成功，但下游的账本、钱包没跟上，重试又让 PSP 扣了一次。解药是<b>幂等（idempotency）</b>：一个操作即使被应用多次，也只生效一次。API 层面的做法：客户端带一个特殊请求头（如 <code>idempotency-key</code>，通常是 UUID），服务端用数据库<b>唯一键约束</b>实现——插入新行，若违反唯一约束就知道这笔已经处理过，直接把已有对象返回给客户端。PSP 那边同理，用前面说过的 nonce（随机数）：同一个 nonce 绝不处理两次。本地和远端的闸门都关上，重复扣款才真正无路可走。</p>
+
+  <h3><span class="no">7</span>一致性：分布式世界里账怎么轧平</h3>
+  <p>解决什么问题：一笔支付的生命周期里会连续调用多个有状态服务——PSP、账本、钱包、支付服务——任何两环之间的通信都可能失败。防线是第 6 小节的精确一次处理，加上第 2 小节的对账，两者合起来保证所有服务之间<b>最终一致</b>。再往上如果用了主从复制，还要处理复制延迟：用户可能先写主库再从副本读，读到旧数据。缓解办法有二：所有读写都走主库，副本只用于冗余和故障转移；或者用共识算法（如 Paxos、Raft）保证副本始终同步，干脆直接用基于共识的分布式数据库，比如 YugabyteDB 或 CockroachDB。</p>
+
+  <h3><span class="no">8</span>支付安全：八道防线</h3>
+  <p>解决什么问题：钱在哪里，攻击者就在哪里。原文列了一整张清单，逐条对号入座：<b>请求/响应被窃听</b>→全链路 HTTPS；<b>数据被篡改</b>→强制加密加完整性监控；<b>中间人攻击</b>→带证书固定（certificate pinning）的 SSL；<b>数据丢失</b>→跨多个区域复制数据并定期快照；<b>DDoS</b>→限流（rate limiting）加防火墙；<b>卡号被盗</b>→用令牌（token）代替真实卡信息存储；<b>PCI 合规</b>→处理品牌信用卡组织的安全标准，躲不掉；<b>欺诈</b>→地址验证、卡片验证码（CVV）、用户行为分析一起上。每一层都不复杂，缺一层都是洞。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>同步通信简单，但随规模变大性能低、故障隔离差、强耦合、难扛突发——<b>服务自治必须付异步的学费</b>。</li>
+      <li>重试是必需品也是双刃剑：没有幂等键，重试就等于帮用户重复扣款。</li>
+      <li>托管支付页面把法规包袱甩给了 PSP，代价是你失去了对支付页面的掌控，用户体验要看 PSP 脸色。</li>
+      <li>复制延迟会让用户在主库和副本之间看到不一致的钱数——要么读写全走主库，要么上共识。</li>
+      <li>一笔支付可能挂起数小时（高风险人工审查、3D Secure），"处理中"状态和进度页不是锦上添花，是必需品。</li>
+      <li>对账捞出来的不匹配有三类，<b>最麻烦的那类只能靠财务团队人肉调查</b>——自动化有边界。</li>
+      <li>还有一堆没展开的话题：监控告警、调试工具（快速搞清楚一笔支付为什么失败）、货币兑换、不同地区支付方式差异、印度巴西的现金支付、Google/Apple Pay 集成。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>支付的难点从来不是 TPS，是<b>一笔恰好一次</b>：幂等键 + 唯一约束，本地远端两头堵。</li>
+      <li>复式记账让每笔钱的来龙去脉可追溯，所有条目加总恒为零——账永远要轧得平。</li>
+      <li>成功路径之外还有对账兜底：每天拿 PSP 的结算文件逐笔比对，对不上的由财务收口。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../26.%20Payment%20System/Readme.zh-CN.md">26. Payment System/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="25.html"><span>上一讲</span>25 · 实时游戏排行榜 ←</a>
+  <a class="next" href="27.html"><span>下一讲</span>27 · 数字钱包 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

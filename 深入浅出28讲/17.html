@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第17讲 · 附近好友：叮，朋友在你身边</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g4">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 17 讲 · 附近好友：叮，朋友在你身边</span>
+  <a href="16.html">← 上一讲 16</a>
+  <a href="18.html">下一讲 18 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 17 讲 / 共 28 讲 · 第四阶段「地理与数据」</div>
+  <h1>附近好友：叮，朋友在你身边</h1>
+  <div class="en">Nearby Friends</div>
+  <p class="one"><b>一句话：</b>好朋友走进你 5 英里内，你的手机立刻叮一声。位置每 30 秒更新一次，10 亿用户的手机都在实时对表——这一讲就是这张实时雷达网怎么织。</p>
+  <div class="stats">
+    <span class="stat">目标：10 亿用户，1 亿日活</span>
+    <span class="stat">附近：5 英里半径（可配置）</span>
+    <span class="stat">位置更新 QPS：33.4 万</span>
+    <span class="stat">pub/sub 转发：1400 万次/秒</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">晚自习教室</span>晚自习，每个人都每 30 秒在教室后墙的小黑板上写下自己的座位号。值日生盯着黑板：谁的好友坐进了五排以内，就立刻给那个人递一张纸条。朋友多的，纸条递得多；朋友值日生全教室几百个座位，只负责跟自己熟的人对表。<b>附近好友系统就是一间超大教室：黑板是位置缓存，递纸条是 pub/sub，值日生就是 WebSocket 服务器。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>上一讲是"附近的位置"，位置基本不动；这一讲是"附近的好友"，<b>位置每时每刻都在变</b>。要解决的问题：用户开着 App，随时知道哪个好朋友正在自己附近、他多久前更新过位置。面试里要先问清几件事：多远算"附近"？答：<b>5 英里，可配置</b>。按直线距离还是绕路算？答：直线。多少用户？答：<b>10 亿用户，10% 用这个功能</b>，即 1 亿日活、1,000 万并发。要不要存历史位置？要，对机器学习有价值。不活跃的好友 10 分钟内消失行不行？行。GDPR 先不管，求简。</p>
+  <p>功能需求就两条：好友列表带距离和时间戳；列表每隔几秒刷新一次。</p>
+  <p>非功能需求也三条，但都很"实时"：<b>低延迟</b>（位置更新要快到人没走出两条街）、<b>可靠性</b>（丢一两个点没关系，系统别挂）、<b>最终一致性</b>（各副本差几秒可以接受，不要求毫秒级一致）。</p>
+  <p>规模估算，原文的数字：</p>
+  <table class="num">
+    <tr><th>项</th><th>数值</th><th>说明</th></tr>
+    <tr><td>附近半径</td><td>5 英里</td><td>可配置；直线距离</td></tr>
+    <tr><td>位置刷新间隔</td><td>30 秒</td><td>人步行慢，不用更频繁</td></tr>
+    <tr><td>并发用户</td><td>1,000 万</td><td>1 亿日活 × 10%</td></tr>
+    <tr><td>平均每用户好友</td><td>400 人</td><td>均用此功能；每页展示 20 个</td></tr>
+    <tr><td>位置更新 QPS</td><td>≈ 33.4 万/秒</td><td>1000 万 ÷ 30</td></tr>
+    <tr><td>单人单次更新转发量</td><td>≈ 40 次</td><td>400 好友 × 10% 在线</td></tr>
+  </table>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>为什么不能点对点（peer-to-peer）直连？手机网络忽断忽续，又省电优先，自己管连接不现实。所以要一个共享后端来<b>扇出（fan-out）</b>：收位置更新、找出谁该收到、距离超了就不发。</p>
+  <div class="flow">
+    <span class="node">移动客户端</span><span class="arrow">→</span>
+    <span class="node">负载均衡器</span><span class="arrow">→</span>
+    <span class="node">REST API 服务器</span><span class="arrow">/</span>
+    <span class="node">WebSocket 服务器（有状态）</span><span class="arrow">→</span>
+    <span class="node">Redis 位置缓存</span><span class="arrow">＋</span>
+    <span class="node">Redis pub/sub</span><span class="arrow">→</span>
+    <span class="node">用户数据库</span><span class="arrow">＋</span>
+    <span class="node">位置历史数据库</span>
+  </div>
+  <p>分工的理由：<b>REST API 服务器</b>管杂事——加好友、改资料，传统请求-响应就够。<b>WebSocket 服务器</b>是有状态的长连接服务器，位置更新和推送都走它，它还在客户端初始化时"播种（seed）"附近好友的位置。<b>Redis 位置缓存</b>只存每个活跃用户的最新位置，条目带 TTL，过期即不活跃，天然限内存。<b>Redis pub/sub</b>是轻量消息总线，每个用户一个频道，谁的好友动了就广播给谁。<b>位置历史数据库</b>（如 Cassandra）专职记历史，供分析用，不参与实时路径。</p>
+  <p>一条位置更新的旅程：客户端 → 负载均衡器 → 它的 WebSocket 长连接 → 写位置历史库 → 更新位置缓存（服务器内存里也留一份，方便算距离）→ 往 Redis pub/sub 的本人频道发布 → 订阅了这个频道的好友们的服务器收到 → 算一遍距离，只把 5 英里内的转发出去。平均每人 400 个好友、10% 在线，所以每收一条更新要转发约 40 次。</p>
+  <p>WebSocket 侧有五条例程：周期位置更新、接收好友更新、初始化（发位置换附近好友列表）、订阅新好友、取消订阅（好友上线/下线时）。数据模型很轻：缓存里是 <code>user_id → lat, long, timestamp</code> 映射；历史表就这四列。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文深入设计的 6 个小节）</h2>
+
+  <h3><span class="no">1</span>每个组件怎么扩</h3>
+  <p>这解决"每个零件到千万并发还扛不扛得住"的问题。<b>API 服务器</b>最好办：自动扩缩组（autoscaling groups）加多复制几个实例。<b>WebSocket 服务器</b>横向扩也容易，但拆机器时要优雅：先在负载均衡器里标"排空（draining）"，不接新连接，等老连接走完再下线。<b>客户端初始化</b>是一条固定流水线：取好友 → 订阅他们的频道 → 从缓存读位置 → 转发给客户端。<b>用户数据库</b>按 user_id 分片，用户/好友数据最好包成专门的服务和 API，交给专门的团队。<b>位置缓存</b>多起几个 Redis 节点就能分片，TTL 同时给内存总量上了闸，但写入压力依旧大。<b>Redis pub/sub</b>用了一个关键事实：建好的频道没人订阅就不占内存，所以给所有用户预分配频道，免得"用户上线要新建频道并通知一堆服务器"这种连锁麻烦。</p>
+
+  <h3><span class="no">2</span>Redis pub/sub 集群：真正的硬骨头</h3>
+  <p>这解决"1400 万次/秒的推送，单机撑不住"的问题。频道内存约 200GB，两台各 100GB 的 Redis 就够装。但量才是问题：每秒约 1,400 万次推送，单机约 10 万次/秒，<b>至少要 140 台 Redis 服务器</b>，必须是分布式集群。集群靠服务发现组件（ZooKeeper 或 etcd）记录哪些服务器活着、哪个频道在哪台机器上；WebSocket 服务器把这份哈希环数据缓存在内存里省查询。扩缩容交给每日任务按历史流量执行，平时<b>超量配置（overprovision）</b>顶住峰值。Redis 集群在这里算有状态存储：频道要维护状态，扩缩时还得协调订阅者搬家。三个坑：大量重新订阅请求涌来；搬频道会漏掉少量位置更新（此场景可接受，但挑流量低谷操作）；用<b>一致性哈希（Consistent Hashing）</b>把搬走的频道数压到最小——第 5 讲的工具在这直接派上用场。</p>
+
+  <h3><span class="no">3</span>添加 / 移除好友</h3>
+  <p>这解决"好友关系一变，订阅关系跟着变"的问题。附近好友只是大应用的一个功能，好友事件发生时，移动客户端注册回调，主动向 WebSocket 服务器发消息：加好友就订阅对方频道，删好友就退订。逻辑很薄，但它是"社交图"和"实时管道"之间的接缝。</p>
+
+  <h3><span class="no">4</span>好友很多的用户</h3>
+  <p>这解决"少数大 V 拖垮个别服务器"的问题。先设上限：每人好友总数封顶，Facebook 的上限是 5000。"鲸鱼（whale）"用户所在的那台 WebSocket 服务器负载会偏高，只要服务器池够大、负载分得匀，就扛得住。别忘了第一步的估算正是从"400 好友"来的——上限护住了"人均 400 好友"这个估算假设。</p>
+
+  <h3><span class="no">5</span>附近的随机陌生人</h3>
+  <p>这解决面试官追问："能不能偶尔在地图上看到附近的陌生面孔？"做法：按 <b>geohash</b> 建一个 pub/sub 频道池，谁落在哪个 geohash 就订阅哪个频道，收这个格子里的陌生人位置更新。人在格子边界上怎么办？<b>同时订阅相邻的几个 geohash</b>，把跨界的情况兜住。格子越大越省订阅，噪音也越多，粒度是个权衡。</p>
+
+  <h3><span class="no">6</span>Redis pub/sub 的替代方案：Erlang</h3>
+  <p>这解决"不想被 Redis 集群的运维绑住"的问题。Erlang 天生为分布式设计：在一个分布式 Erlang 应用里同时开数百万个互相通信的小进程，WebSocket 连接和 pub/sub 频道用同一套模型搞定，省掉一层中间件。代价是人才：Erlang 太小众，招到好开发者不容易。技术选型，一半是选生态。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>1400 万次/秒的 pub/sub 转发是真正的瓶颈：<b>至少要 140 台 Redis</b>，单机方案直接出局。</li>
+      <li>扩缩容期间会漏掉少量位置更新，只能靠挑流量低谷＋一致性哈希把损失压低，消灭不掉。</li>
+      <li>WebSocket 服务器有状态：下机器必须先"排空"，硬拔等于把连着的人踢下线。</li>
+      <li>位置数据允许最终一致，所以能全走缓存和内存；换成本子一样要求强一致，这套设计就得重做。</li>
+      <li>"鲸鱼"用户和 geohash 边界是两个容易漏算的角落：负载均衡和跨界订阅都要提前想。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>手机不适合点对点：共享后端扇出，<b>WebSocket 管连接，Redis 管位置与广播</b>。</li>
+      <li>规模两笔账：写入 33.4 万 QPS × 转发 40 次 = 每秒 1,400 万次推送，集群加一致性哈希是必需品。</li>
+      <li>位置数据只要求最终一致：TTL 缓存、允许丢点、挑低谷扩缩容——需求松一寸，设计轻一丈。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../17.%20Nearby%20Friends/README.zh-CN.md">17. Nearby Friends/README.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="16.html"><span>上一讲</span>16 · 邻近服务 →</a>
+  <a class="next" href="18.html"><span>下一讲</span>18 · Google 地图 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

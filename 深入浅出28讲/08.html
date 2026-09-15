@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第8讲 · 短链接：给网址起小名</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g2">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 8 讲 · 短链接：给网址起小名</span>
+  <a href="07.html">← 上一讲 07</a>
+  <a href="09.html">下一讲 09 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 8 讲 / 共 28 讲 · 第二阶段「造零件」</div>
+  <h1>短链接：给网址起小名</h1>
+  <div class="en">URL Shortener · 短码生成与重定向</div>
+  <p class="one"><b>一句话：</b>把老长的网址压成几个字符，点它就能跳回去。功能上这就是 TinyURL 干的事，难点不在"能跳"，而在每天 1 亿个新短码还不能重号。</p>
+  <div class="stats">
+    <span class="stat">写入：1 亿个/天</span>
+    <span class="stat">读写比：10 : 1</span>
+    <span class="stat">规模：3650 亿条 · 365 TB</span>
+    <span class="stat">短码：7 字符 ≈ 3.5 万亿空间</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">快递取件码</span>你把一件大行李存进快递柜，柜台不给你行李本身，只回你一张小票：6 位取件码。任何人凭这个码，都能在柜子里找到你的行李。短链接一模一样：把又长又乱的原网址"存"进数据库，发一个几个字符的短码当小票；别人点这个码，服务器查柜、领出原网址，把浏览器支过去。<b>整个系统就是一台"网址快递柜"，核心难题只有一个：每天 1 亿张小票，不能发重号。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>原始网址常常长到没法看：带一堆参数的链接塞进短信、微博、二维码里，又丑又占地方。这一讲要做的就是 TinyURL 那种服务：<b>给它一个长网址，它返回一个尽可能短的唯一短码；别人点短码，浏览器跳回原网址。</b></p>
+  <p>拆开看，系统要同时满足三件事：<b>URL 缩短</b>（生成短码）、<b>重定向</b>（点短码跳回去）、<b>高可扩展性</b>（流量大了扛得住）。原文给的需求和规模假设：</p>
+  <table class="num">
+    <tr><th>指标</th><th>假设</th></tr>
+    <tr><td>短 URL 生成量</td><td>每天 1 亿个请求</td></tr>
+    <tr><td>服务年限</td><td>10 年容量</td></tr>
+    <tr><td>读写比例</td><td>约 10 : 1（读远多于写）</td></tr>
+    <tr><td>总记录数</td><td>约 3650 亿条</td></tr>
+    <tr><td>总存储</td><td>约 365 TB</td></tr>
+    <tr><td>短码长度</td><td>7 个字符（够用且不丑）</td></tr>
+  </table>
+  <p>对外接口只有两个，简洁得不像话：</p>
+  <ol class="clean">
+    <li><b>缩短：</b><code>POST api/v1/data/shorten</code>，参数 <code>{longUrl: ...}</code>，返回 <code>shortURL</code>。</li>
+    <li><b>重定向：</b><code>GET api/v1/shortUrl</code>，返回对应的 <code>longURL</code>，让浏览器跳过去。</li>
+  </ol>
+  <p>真正有意思的是背后的算术：一天 1 亿个、存 10 年，就是 3650 亿条、365 TB——所以"怎么发号"和"怎么存"才是这一讲的主菜。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>把读写两条路画成一张图，数据这样流动：</p>
+  <div class="flow">
+    <span class="node">用户</span><span class="arrow">→</span>
+    <span class="node">Web 服务器（无状态 ×N）</span><span class="arrow">→</span>
+    <span class="node">写：ID 生成器 → Base 62 编码</span><span class="arrow">→</span>
+    <span class="node">数据库</span><span class="arrow">·</span>
+    <span class="node">读：先查缓存</span><span class="arrow">→</span>
+    <span class="node">301 / 302 重定向</span>
+  </div>
+  <p>两条路分开，是因为流量结构不对等：读写比 10:1，十个请求里九个是"点短码跳转"。<b>写路径</b>（缩短）要解决的问题是发号不重复——先由分布式 ID 生成器发唯一 ID，再编码成短码落库；<b>读路径</b>（重定向）要解决的问题是快——热门映射放缓存，命中就不用碰数据库，最后按 301 或 302 把浏览器支回长网址。</p>
+  <p>Web 层刻意做成无状态：它只负责接请求、查库、转发，不保存任何"记忆"，这样流量涨了加减服务器就行。状态全在数据库和缓存里，那是第 1 讲就立下的规矩。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文小节顺序）</h2>
+
+  <h3><span class="no">1</span>URL 重定向：301 还是 302</h3>
+  <p>这解决"点了短码之后，浏览器该怎么跳"。两个状态码，一字之差，后果不同。<b>301 重定向</b>：告诉浏览器"这个短码永久对应那个长网址"，浏览器会把结果<b>缓存</b>下来，之后同一短码不再来问短链服务——省服务器，但点击统计也从此丢了。<b>302 重定向</b>：临时跳转，浏览器每次都要回来问——能精确统计点击次数，适合做分析，代价是读流量全落在服务上。选型是业务题，不是技术题。</p>
+
+  <h3><span class="no">2</span>URL 缩短：哈希函数的两条军规</h3>
+  <p>这解决"长网址怎么变成短码"。做法是用<b>哈希函数（Hash Function）</b>把长网址映射成短码，但它必须满足两条：每个 <code>longURL</code> 都被哈希成<b>唯一的</b> <code>hashValue</code>；每个 <code>hashValue</code> 都能<b>映射回</b>对应的 <code>longURL</code>。前者保证不重号，后者保证跳得回去——两条缺一，快递柜就乱了。</p>
+
+  <h3><span class="no">3</span>数据模型：一张三列表</h3>
+  <p>这解决"映射存哪儿"。把 <code>&lt;shortURL, longURL&gt;</code> 的对应关系存进<b>关系型数据库</b>，表结构只有三列：<code>id</code>（主键）、<code>shortURL</code>、<code>longURL</code>。不折腾花哨存储，因为需求朴素：按短码查原网址，一行 SQL 的事。365 TB 听着吓人，但每条记录就几十字节，关系型数据库加缓存扛 10:1 的读绰绰有余。</p>
+
+  <h3><span class="no">4</span>哈希函数之一：Base 62 转换</h3>
+  <p>这解决"怎么把号码变成字符串"。字符集用 <code>[0-9, a-z, A-Z]</code>，共 <b>62 个可用字符</b>（所以叫 Base 62）。给每个网址分配一个唯一 ID，把 ID 做 62 进制转换，得到的字符串就是短码。原文的例子：ID <code>2009215674938</code> → Base 62 转换后 → <code>zn9edcu</code>。算笔账：7 位字符最多有 62⁷ ≈ <b>3.5 万亿个</b>唯一短码，装下 3650 亿条需求还有近十倍余量。</p>
+
+  <h3><span class="no">5</span>哈希函数之二：哈希 + 冲突解决</h3>
+  <p>这解决"不用 ID 怎么直接压码"。另一条路：拿 CRC32、MD5 或 SHA-1 这类哈希函数直接对长网址算哈希，取结果<b>前 7 个字符</b>当短码。问题是哈希值撞车——两个不同网址算出同一个短码。补救办法：撞了就<b>递归地追加一个预定义字符串</b>，再哈希，直到不撞为止；缺点是成本高。<b>布隆过滤器（Bloom Filter）</b>是省钱的判重工具：它能快速告诉你一个短码"一定不存在"或"可能存在"，把绝大多数查库确认挡在内存里。</p>
+
+  <h3><span class="no">6</span>方案对比：两条路摆上台面</h3>
+  <p>这解决"选哪条路"。两条路线对比如下：</p>
+  <table class="num">
+    <tr><th></th><th>哈希 + 冲突解决</th><th>Base 62 转换</th></tr>
+    <tr><td>短码长度</td><td>固定</td><td>不固定，随 ID 增长变长</td></tr>
+    <tr><td>唯一 ID 生成器</td><td>不需要</td><td>需要</td></tr>
+    <tr><td>冲突</td><td>可能冲突，要解决</td><td>不会冲突</td></tr>
+    <tr><td>预知下一个短码</td><td>做不到（不依赖 ID）</td><td>ID 按 1 递增就能猜——安全隐患</td></tr>
+  </table>
+  <p>原文示例系统选了 Base 62：无冲突、流程直，代价是必须配一个分布式 ID 生成器——那正是上一讲（第 7 讲）的主角。</p>
+
+  <h3><span class="no">7</span>URL 缩短流程：写路径四步走</h3>
+  <p>这解决"来一个缩短请求，内部按什么顺序动"。流程是：</p>
+  <ol class="clean">
+    <li>先查 <code>longURL</code> 是否已存在于数据库中（同一个长网址重复缩短，不该发两张小票）。</li>
+    <li>已存在，直接返回现有的 <code>shortURL</code>。</li>
+    <li>不存在，用<b>分布式 ID 生成器</b>生成唯一 ID。</li>
+    <li>用 Base 62 把 ID 转成 <code>shortURL</code>，把 <code>&lt;id, shortURL, longURL&gt;</code> 这条映射存进数据库。</li>
+  </ol>
+
+  <h3><span class="no">8</span>URL 重定向流程：读路径三步走</h3>
+  <p>这解决"点短码之后内部怎么找路"。流程是：</p>
+  <ol class="clean">
+    <li>用户点击某个 <code>shortURL</code>。</li>
+    <li>查 <code>&lt;shortURL, longURL&gt;</code> 映射：<b>先查缓存</b>求快；缓存没有，再查数据库。</li>
+    <li>拿到 <code>longURL</code>，把用户重定向过去（301 或 302）。</li>
+  </ol>
+  <p>读写比 10:1 的全部分量都在第 2 步：读路径必须短，热点映射必须留在内存里。</p>
+
+  <h3><span class="no">9</span>限流器：防刷票的保安</h3>
+  <p>这解决"有人拿脚本疯狂 shorten 怎么办"。加<b>限流器（Rate Limiter）</b>，按 IP 设置请求限制，超限直接拒。没有它，1 亿/天是容量，有它，1 亿/天才只是正常业务量。</p>
+
+  <h3><span class="no">10</span>可扩展性：两层各自扩</h3>
+  <p>这解决"流量再涨十倍怎么办"。<b>Web 层</b>无状态，加服务器就扩，减服务器就缩，和前两讲一个套路；<b>数据库层</b>上复制（Replication）和分片（Sharding）：复制分摊读压力，分片分摊数据量。365 TB 早晚要多机分摊，这一步是预留的台阶。</p>
+
+  <h3><span class="no">11</span>分析：点击数据是隐藏资产</h3>
+  <p>这解决"白跳的流量凭什么浪费"。收集点击率、来源和时间戳：谁发的链接、什么时候被点、点了多少次。短链服务天然站在流量入口上，这些数据拿来做业务洞察，是附赠的金矿。</p>
+
+  <h3><span class="no">12</span>高可用性与可靠性：柜子不能塌</h3>
+  <p>这解决"机器挂了小票还能不能取件"。靠数据库复制和容错设计兜底：主库倒了从库顶上，保证服务的一致性和可靠性。短链是基础设施，别人把链接发出去了，你这儿就必须 24 小时取得出货。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li><b>301 和 302 是来回扯的绳：</b>301 被浏览器缓存后，点击统计永远丢了；302 每次都要查服务，读压力实打实。想省钱还是想数清楚，只能选一个。</li>
+      <li>哈希取前 7 位<b>必然撞车</b>；递归追加字符串能解，但成本高，而且越撞越慢。</li>
+      <li>布隆过滤器会说谎：它只能告诉你"一定不存在"或"可能存在"，<b>"可能存在"必须再查库确认</b>，不能直接当结论。</li>
+      <li>Base 62 若 ID 按 1 递增，任何人都能<b>猜出下一个短 URL</b>，顺藤摸瓜遍历别人的链接——这是原文点名的安全隐患。</li>
+      <li>缩短前先查"这个长网址有没有缩短过"，在 3650 亿行的表上不是免费操作，去重本身就要花心思。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>发号只有两张牌：<b>哈希 + 冲突解决</b>（长度固定但会撞）或<b>唯一 ID + Base 62</b>（无冲突但要配 ID 生成器、还可能被猜号）。</li>
+      <li>10:1 的读多写少系统，先把<b>读路径</b>做短：缓存命中就不要碰数据库。</li>
+      <li>301 省服务器、302 保统计——<b>这是业务决策</b>，不是随手填的状态码。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../08.%20URL%20Shortener/Readme.zh-CN.md">08. URL Shortener/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="07.html"><span>上一讲</span>07 · 唯一 ID 生成器</a>
+  <a class="next" href="09.html"><span>下一讲</span>09 · 网络爬虫 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

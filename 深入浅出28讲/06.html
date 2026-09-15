@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第6讲 · 键值存储：全班共用的大字典</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g2">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 6 讲 · 键值存储：全班共用的大字典</span>
+  <span><a href="05.html">← 上一讲 05</a> · <a href="07.html">下一讲 07 →</a></span>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 6 讲 / 共 28 讲 · 第二阶段「造零件」</div>
+  <h1>键值存储：全班共用的大字典</h1>
+  <div class="en">Key-Value Store</div>
+  <p class="one"><b>一句话：</b>存千亿词条、坏几台机器也不丢数据的大字典。整个系统只有两个动作：存进去 put(key, value)，凭钥匙取出来 get(key)——但要把这本字典做成全班的、扛得住停电断网的，得靠一整套零件。</p>
+  <div class="stats">
+    <span class="stat">数据模型：put(key, value) / get(key)</span>
+    <span class="stat">键值对：&lt;10 KB</span>
+    <span class="stat">强一致条件：W + R &gt; N（典型 N=3，W=R=2）</span>
+    <span class="stat">CAP：三选二，CA 不存在</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">快递柜</span>你去过小区的快递柜：存件时系统发你一个取件码，取件时输入取件码，柜门啪一声弹开——你从不关心包裹放在第几层第几格。键值存储就是这只柜子：put(key, value) 是存件，get(key) 是凭码取件。柜子多到摆满全城，就要分区摆放（按小区布柜机）；重要包裹在几个柜机各存一份（副本）；某个柜机断电了，别的柜机照常开门（容错），等它修好再把积压的件还回去。<b>这一讲就是把一只柜子做成全市联网的柜子系统。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>这一讲要造的东西：一个<b>分布式键值存储（key-value store）</b>。它是非关系型数据库，数据就是一个个键值对（key-value pair），每个键唯一，凭键取值。接口小得可怜，只有两个：</p>
+  <ul class="clean">
+    <li><code>put(key, value)</code>：插入数据。</li>
+    <li><code>get(key)</code>：检索数据。</li>
+  </ul>
+  <p>接口简单，要求一点也不简单。原文的设计特性逐条列出来：</p>
+  <table class="num">
+    <tr><th>需求</th><th>说明</th></tr>
+    <tr><td>键值对大小</td><td>较小，&lt;10 KB</td></tr>
+    <tr><td>数据规模</td><td>支持大数据量——多到一台机器装不下</td></tr>
+    <tr><td>可用性</td><td>高：部分节点宕机，系统照常响应</td></tr>
+    <tr><td>扩展性</td><td>自动扩缩容，机器加减不用停机</td></tr>
+    <tr><td>一致性</td><td>可调：在强一致与最终一致之间按需选择</td></tr>
+    <tr><td>延迟</td><td>低</td></tr>
+  </table>
+  <p>单机版做不到吗？做不到。单台服务器的内存有限，装不下"大数据量"。<b>所以这一讲的真正题目是：怎么把一只柜子拆成全城联网的一群柜子，还不丢件、不错件、取得快。</b></p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>照原文的最终架构图，客户端的一次请求这样流动：</p>
+  <div class="flow">
+    <span class="node">客户端 get / put</span><span class="arrow">→</span>
+    <span class="node">协调器 Coordinator</span><span class="arrow">→</span>
+    <span class="node">一致性哈希环上的节点</span><span class="arrow">→</span>
+    <span class="node">N 台副本（跨数据中心）</span><span class="arrow">→</span>
+    <span class="node">提交日志 / 内存缓存 / SSTable</span>
+  </div>
+  <p>客户端只认两个简单 API：get(key) 和 put(key, value)，不需要知道后面有多少台机器。<b>协调器（coordinator）</b>是客户端和集群之间的代理：它把 key 哈希到环上，找到该负责的节点，写请求还要沿环顺时针找出前 N 台副本一起写。</p>
+  <p>为什么这样切模块？因为每一块只背一个责任：哈希环管"数据撒得匀"，副本管"坏一台不丢"，日志和缓存管"单机内部又快又稳"。系统<b>完全去中心化</b>——每台节点职责相同，加节点、移节点全自动进行，不存在单点故障（single point of failure）。下面第三步，把每个零件拆开看。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（从单机一路走到最终架构）</h2>
+
+  <h3><span class="no">1</span>单服务器版：一张哈希表打天下</h3>
+  <p>先看起点。单机键值存储用一个<b>哈希表（hash table）</b>把键值对放在内存里，put 和 get 都接近瞬时。内存不够还想挤，有两招优化：数据压缩；把不常访问的冷数据挪到磁盘上。但哈希表再大也长在一台机器的内存里——内存有上限，这就是分布式方案存在的理由。</p>
+
+  <h3><span class="no">2</span>CAP 定理：分布式世界的三选二</h3>
+  <p>数据一上多台机器，就撞上 <b>CAP 定理</b>。三个保证：一致性（Consistency）——所有客户端同时看到相同的数据；可用性（Availability）——部分节点宕机，系统仍能响应每个请求；分区容错性（Partition Tolerance）——网络断了，系统还能跑。CAP 说：<b>三个最多同时拿两个</b>。网络故障不可避免，分区容错必须留着，所以 CA 系统在现实里并不存在。分区真发生时只剩一道选择题：选 <b>CP</b>（银行系统就是这类），阻塞写入，宁可不服务也不给错数据；选 <b>AP</b>（最终一致性那一路），继续接受读写，哪怕读到旧数据，等分区恢复再把数据同步过去。</p>
+
+  <h3><span class="no">3</span>数据分区：一致性哈希上岗</h3>
+  <p>千亿条键值对，怎么均匀撒到几百台机器？用<b>一致性哈希（Consistent Hashing）</b>——第 5 讲的主角，这里直接上岗。两个好处：服务器增减时只挪动一小部分数据，自动扩缩容；靠<b>虚拟节点（virtual node）</b>兼容机器的强弱差异——一台机器的虚拟节点数量和它的容量成正比，大机器多背几个点，小机器少背几个。</p>
+
+  <h3><span class="no">4</span>数据复制：沿环顺时针数 N 台</h3>
+  <p>分区解决"放得下"，复制解决"坏一台不丢"。每个键的数据复制到 <b>N</b> 台服务器。挑哪 N 台？从 key 在环上的位置出发，<b>顺时针遍历，取环上的前 N 台</b>来存副本。摆放还有一条纪律：副本放进<b>不同的数据中心</b>——这样扛得住的不只是机器故障，是整个机房级别的灾难，而且虚拟节点满天飞的情况下可靠性更高。</p>
+
+  <h3><span class="no">5</span>一致性：法定人数共识（Quorum Consensus）</h3>
+  <p>副本一多，新问题跟着来：写到几台算成功？读到几台才敢返回？答案是一组叫<b>法定人数共识（Quorum Consensus）</b>的规则：<b>N</b> 是副本总数；<b>W</b> 是写法定人数（write quorum），一次写必须拿到 W 个副本确认才算成功；<b>R</b> 是读法定人数（read quorum），一次读必须等到至少 R 个副本响应。关键规则就一条：<b>W + R &gt; N，就能保证强一致性</b>，典型配置是 N = 3、W = R = 2。</p>
+  <p>这几个数字是延迟与一致性之间的跷跷板：R = 1 且 W = N，为快速读取优化；W = 1 且 R = N，为快速写入优化；W + R ≤ N，两边都快，但强一致性没了。一致性本身还分三档：<b>强一致性（Strong Consistency）</b>——读到的总是最新写入的结果；<b>弱一致性（Weak Consistency）</b>——后续的读可能看不到最新值；<b>最终一致性（Eventual Consistency）</b>——给足时间，所有更新都会传播，所有副本终会一致。</p>
+
+  <h3><span class="no">6</span>不一致怎么办：向量时钟（Vector Clock）</h3>
+  <p>AP 路线里，两个副本可能被同时修改：服务器 1 改了名字，服务器 2 也改了名字，两个修改并行发生，得到互相冲突的值，记作版本 v1 和 v2。怎么分辨谁新谁旧、谁该留谁该合并？用<b>版本控制</b>加<b>向量时钟（vector clock）</b>：把每次修改都当成一个不可变的新版本，并给每个数据项挂一串 [服务器, 版本] 对，形如 D([S1, v1], [S2, v2], …, [Sn, vn])。数据在某台服务器 Si 被改时：Si 已在时钟里，对应计数器加 1；不在，就新增一条 [Si, 1]。</p>
+  <p>比版本靠两条规则：版本 X 的<b>所有</b>计数器都小于等于 Y 的对应计数器，X 就是 Y 的祖先（ancestor），可以直接被覆盖；Y 里<b>至少有一个</b>计数器比 X 小，两个版本就是兄弟（sibling）——冲突实锤。检测到冲突后，系统不替你瞎猜，而是交给<b>应用程序特定的逻辑或客户端干预</b>来调和数据。代价两条：客户端的复杂度上升了；时钟条目只增不减，得靠<b>裁剪（trimming）</b>策略压住它的大小。</p>
+
+  <h3><span class="no">7</span>故障检测：Gossip 协议与心跳</h3>
+  <p>想处理故障，先得可靠地知道谁病了。<b>只听一台服务器说"它挂了"是不够的——通常要至少两个独立的信息来源，才能宣告一台服务器宕机。</b>具体做法用 <b>Gossip 协议</b>：每个节点维护一份成员名单（成员 ID + 心跳计数器 heartbeat counter），定期把自己的心跳计数器加 1，并随机发给一群节点互相通气；某个成员的心跳超过预定义的时间没涨，就被判离线。像村口传闲话，人人都小声跟邻居交换消息，坏消息最终全村皆知，而且没有中央广播台。</p>
+
+  <h3><span class="no">8</span>临时故障：宽松法定人数与带提示的移交</h3>
+  <p>节点只是暂时离线（重启、网络抖动），不能干等它回来。<b>宽松法定人数（Sloppy Quorum）</b>：不强制原来那 W 台确认，而是在哈希环上选<b>前 W 个健康服务器</b>接着处理写、前 R 个健康服务器处理读，离线的先跳过——法定人数的要求被"借"到了健康节点上，可用性保住了。</p>
+  <p><b>带提示的移交（Hinted Handoff）</b>负责还账：这些代班节点把本该属于宕机服务器的变更记下来，等它恢复上线，再把变更推回去追赶，副本间的一致性补回来。一个管"顶班"，一个管"补课"，临时故障就闭环了。</p>
+
+  <h3><span class="no">9</span>永久故障：Merkle 树高效对账</h3>
+  <p>节点彻底死了又回来，或副本长期各长各的，两边差了多少？逐条比对太慢，要传的数据量也太大。<b>Merkle 树（默克尔树，又称哈希树）</b>就是为高效对账而生的：叶子节点存各数据块的哈希值，非叶节点存其子节点的哈希值，一路汇到顶上的<b>根哈希（root hash）</b>——根就是整份数据的"指纹"。构建分四步：把键空间切成一个个<b>桶（bucket）</b>；用均匀哈希（uniform hashing）对桶里每个键求哈希；每个桶合成一个单一哈希值；逐层合并桶哈希，算出更上层的哈希，最终得到根哈希。</p>
+  <p>对账时先比两个副本的根哈希：一致，收工；不一致，就递归往下比子哈希，一层层定位到具体是哪个桶脏了，<b>只同步不一致的那部分数据</b>。三个优点全来自这个"只补不一样的"：高效（传输量小）、可扩展（数据集再大也对得起）、可靠（副本最终一致）。</p>
+
+  <h3><span class="no">10</span>数据中心故障：把副本撒到多个机房</h3>
+  <p>单机故障之上还有机房级灾难。对策在第 4 节就埋了伏笔：把数据<b>复制到多个数据中心</b>，一个机房整体挂了，别的机房照常服务。这是可用性设计的最后一道防线——节点故障靠 sloppy quorum 扛，机房故障靠跨机房副本扛。</p>
+
+  <h3><span class="no">11</span>写路径：先记账，再落盘（Cassandra 架构）</h3>
+  <p>单机内部，一条写请求怎么走完？以 Cassandra 架构为例，顺序是：第一步，把写入持久化到<b>提交日志（commit log）</b>——这是防丢的账本，机器崩了还能照着回放；第二步，数据进<b>内存缓存（memory cache）</b>——走到这步写就可以返回成功了，所以快；第三步，内存满了，再把数据批量刷新到磁盘上的 <b>SSTable（Sorted String Table，有序字符串表）</b>。为什么绕这一圈？磁盘随机写慢、顺序写快：日志顺序追加保命，内存即时响应保快，SSTable 有序落盘，给读路径铺路。</p>
+
+  <h3><span class="no">12</span>读路径：布隆过滤器指路</h3>
+  <p>读先查<b>内存缓存</b>——命中就直接返回，全程不碰磁盘。没命中就得去磁盘上的 SSTable 里找，可 SSTable 不止一个，逐个翻太贵。<b>布隆过滤器（Bloom Filter）</b>负责指路：先用它快速判断这个数据可能在哪个 SSTable，把候选缩到极小的范围，再检索并返回。它存在的理由就一个字：快——用一点点误判的代价，换掉全表扫描的时间。</p>
+
+  <h3><span class="no">13</span>最终架构：人人平等的环</h3>
+  <p>所有零件拼起来：客户端只通过两个简单 API 通信——get(key) 和 put(key, value)；<b>协调器（coordinator）</b>是客户端与键值存储之间的代理；节点通过一致性哈希分布在环上；数据在多个节点上复制；系统完全去中心化，节点的添加和移动自动进行；每台节点承担相同的一组职责——<b>没有单点故障</b>。这一讲的大字典，到此装订完成。</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>CAP 的紧箍咒摘不掉：网络分区不可避免，CA 系统现实里不存在；分区真发生时，只能在一致性（阻塞写入）和可用性（可能返回旧数据）之间二选一。</li>
+      <li>Quorum 是跷跷板：R=1 + W=N 读快，W=1 + R=N 写快，W+R≤N 两边都快但强一致性没了——<b>没有"又快又强"的免费午餐</b>。</li>
+      <li>向量时钟把账记给了客户端：冲突检测与调和的复杂度被推给应用程序；时钟条目随更新不断增长，trimming 裁剪策略没设计好就会失控。</li>
+      <li>判死要慎重：一个节点说另一个节点挂了不算数，至少两个独立信息来源——误判会引发不必要的副本迁移和数据搬移。</li>
+      <li>宽松法定人数只是"借宿"：数据暂时寄住在健康节点上，宕机节点恢复后必须靠 hinted handoff 把变更推回去，否则一致性窗口一直敞开。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>键值存储只有 get/put 两个动作，难的是两件事：数据撒得匀（一致性哈希 + 虚拟节点）、副本摆得对（沿环顺时针取前 N 台、跨数据中心）。</li>
+      <li>一致性是可调的旋钮：W + R &gt; N 换强一致（典型 N=3，W=R=2），拿延迟换正确性；分区发生时，一致性 vs 可用性只能二选一。</li>
+      <li>故障分临时和永久：临时靠 sloppy quorum 顶班 + hinted handoff 补课，永久靠 Merkle 树对账——只同步不一致的那部分。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../06.%20Key-Value%20Store/Readme.zh-CN.md">06. Key-Value Store/Readme.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="05.html"><span>上一讲</span>05 →</a>
+  <a class="next" href="07.html"><span>下一讲</span>07 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>

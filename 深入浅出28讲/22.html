@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第22讲 · 酒店预订：最后一间房归谁</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="g5">
+<div id="progress"></div>
+<nav class="topbar"><div class="in">
+  <a href="index.html">目录</a>
+  <span class="mid">第 22 讲 · 酒店预订：最后一间房归谁</span>
+  <a href="21.html">上一讲 21</a>
+  <a href="23.html">下一讲 23 →</a>
+</div></nav>
+
+<div class="wrap">
+<header class="hero">
+  <div class="crumb">第 22 讲 / 共 28 讲 · 第五阶段「真金白银」</div>
+  <h1>酒店预订：最后一间房归谁</h1>
+  <div class="en">Hotel Reservation System</div>
+  <p class="one"><b>一句话：</b>抢订最后一间房，绝不能让两个人同时订到，还允许适度超售。这一讲的难点不在流量有多大，而在并发之下账本必须分毫不差——订出去的房间，一间也不能多。</p>
+  <div class="stats">
+    <span class="stat">规模：5000 家酒店 · 100 万间客房</span>
+    <span class="stat">预订：日均约 24 万笔 · 平均 TPS≈3</span>
+    <span class="stat">库存表：约 7300 万行</span>
+    <span class="stat">超售上限：110%</span>
+  </div>
+</header>
+
+<div class="toc"><b>本讲导航</b>
+  <a href="#analogy">先打个比方</a>
+  <a href="#s1">第一步 · 搞清问题</a>
+  <a href="#s2">第二步 · 画出大框架</a>
+  <a href="#s3">第三步 · 深入零件</a>
+  <a href="#s4">权衡与坑</a>
+  <a href="#s5">记住 3 点</a>
+</div>
+
+<main>
+
+<section id="analogy">
+  <h2>先打个比方</h2>
+  <div class="box"><span class="lab">演唱会抢票</span>热门演唱会开票那一刻，十万人同时点"购票"。售票网站要办三件事：先告诉你还有没有票；你点下去的一瞬间把名额扣下来，别人就抢不到了；你网卡连点十次，也只出一张订单。酒店预订一模一样，只是"票"变成了"某家酒店、某种房型、某一天的一间房"。而且剧院为了对付退票，敢多卖 10% 的票——这就是超售。<b>这一讲讲的，就是让这套动作在高并发下不出错。</b></div>
+</section>
+
+<section id="s1">
+  <h2>第一步 · 搞清问题</h2>
+  <p>这一讲要设计的，是一个类似万豪国际（Marriott International）的酒店预订网站。同一份设计也适用于 Airbnb、机票预订、电影票预订——凡是要"把有限的座位卖给大量并发用户"的系统，骨架都相通。</p>
+  <p>设计前先向面试官澄清范围，原文的对话浓缩成六条：</p>
+  <ul class="clean">
+    <li><b>规模</b>：5000 家酒店，共 100 万间客房。</li>
+    <li><b>付费</b>：预订时全额付款，不是到店再付。</li>
+    <li><b>渠道</b>：只有网站和 App，不支持电话。</li>
+    <li><b>取消</b>：允许。</li>
+    <li><b>超售</b>：允许超售 10%——酒店预期有客户会取消，所以故意多卖。</li>
+    <li><b>聚焦范围</b>：酒店页面、客房详情、预订、管理后台，外加支持超售；房价每天都在变。</li>
+  </ul>
+  <p>非功能需求两条：旺季要能扛住<b>高并发</b>——大量客户同时抢同一家酒店；延迟中等即可——预订最好快，但系统花几秒钟处理也能接受。</p>
+  <p>粗略估算，把直觉变成数字：</p>
+  <table class="num">
+    <tr><th>指标</th><th>数字</th><th>怎么算</th></tr>
+    <tr><td>日预订量</td><td>约 24 万笔</td><td>100 万间 × 70% 入住率 ÷ 平均入住 3 天</td></tr>
+    <tr><td>平均预订 TPS</td><td>约 3</td><td>24 万 ÷ 一天约 10⁵ 秒</td></tr>
+    <tr><td>预订页浏览</td><td>约 30 QPS</td><td>每步转化率 10%，3 步漏斗</td></tr>
+    <tr><td>客房详情页浏览</td><td>约 300 QPS</td><td>预订页浏览 × 10</td></tr>
+  </table>
+  <p>看出来了吗？平均 TPS 只有 3，<b>这个系统的难点从来不在"量"，而在"对"</b>——平均闲着，旺季扎堆，而扎堆的时候最后一间房绝不能卖给两个人。</p>
+</section>
+
+<section id="s2">
+  <h2>第二步 · 画出大框架</h2>
+  <p>高层设计选了微服务架构。请求这样流转：</p>
+  <div class="flow">
+    <span class="node">用户 / 管理员</span><span class="arrow">→</span>
+    <span class="node">CDN（静态资源）</span><span class="arrow">→</span>
+    <span class="node">公共 API 网关（限流 · 鉴权）</span><span class="arrow">→</span>
+    <span class="node">酒店服务</span><span class="arrow">/</span>
+    <span class="node">房价服务</span><span class="arrow">/</span>
+    <span class="node">预订服务（管库存）</span><span class="arrow">→</span>
+    <span class="node">支付服务</span>
+  </div>
+  <p>每个服务为什么单独存在：</p>
+  <ul class="clean">
+    <li><b>酒店服务（Hotel service）</b>：提供酒店和客房详情。这类数据基本不变，可以激进地缓存。</li>
+    <li><b>房价服务（Rate service）</b>：提供未来每天的价格。单拆出来，因为价格每天在变，而且有趣的一点是——<b>价格取决于当天的入住率</b>，它和静态的客房信息不是一类数据。</li>
+    <li><b>预订服务（Reservation service）</b>：系统的心脏。接预订请求、订房，并在预订和取消时更新客房库存。</li>
+    <li><b>支付服务（Payment service）</b>：处理支付，成功后更新预订状态。</li>
+    <li><b>API 网关</b>：公共网关管限流和身份验证；管理功能走<b>内部 API</b>，藏在 VPN 后面，只对授权人员可见；酒店管理服务负责退款、取消支付这类运营操作。服务之间通信用 RPC 框架，比如 gRPC。</li>
+  </ul>
+  <p>对外的 API 是标准 RESTful 三组端点：酒店（增删改查）、客房（增删改查）、预订（查历史、查详情、下单、取消）。预订请求里带一个 <code>reservationID</code>，它不是普通字段，是<b>幂等键（Idempotency Key）</b>——防止重复下单的关键，第三步细讲。</p>
+  <p>数据库选<b>关系型数据库</b>。理由：这是读多写少的系统，NoSQL 的写优化用不上；关系库提供 ACID 保证，没有它，负库存、重复扣款这些事故拦不住；数据结构清晰，关系模型最好表达。</p>
+</section>
+
+<section id="s3">
+  <h2>第三步 · 深入零件（按原文深入设计的顺序）</h2>
+
+  <h3><span class="no">1</span>改进的数据模型：按"房型 × 天"记账</h3>
+  <p>初版数据模型按"具体某一间房"建模，适合 Airbnb，不适合酒店——客人订的是"大床房"这种房型，不是 302 号房，房号到店才分。所以预订 API 改成提交 <code>roomTypeID</code> 和 <code>roomCount</code>，表结构跟着换：四张表——<code>room</code>（客房信息）、<code>room_type_rate</code>（价格）、<code>reservation</code>（预订记录）、<code>room_type_inventory</code>（库存）。</p>
+  <p>最有意思的是 <code>room_type_inventory</code>：<b>每个（hotel_id, room_type_id, date）一行</b>。两个关键列：<code>total_inventory</code> 是客房总数减去暂时下架的；<code>total_reserved</code> 是该房型当天已订出的。行由<b>每日 CRON 作业</b>预先填充。查可用性就是一句 SQL：选出日期范围内每一天的这两列，逐天检查 <code>total_reserved + 要订间数 ≤ 110% × total_inventory</code>——超售就藏在这 110% 里。</p>
+  <p>容量估算：5000 家酒店 × 20 种房型 × 2 年 × 365 天 ≈ <b>7300 万行</b>。不多，一个数据库服务器就够，加读副本做高可用即可。若预订历史太大：老数据挪冷存储，只留当前和未来；真要分片，按 <code>hash(hotel_id) % servers_cnt</code> 切——因为查询永远带 <code>hotel_id</code>。</p>
+
+  <h3><span class="no">2</span>并发问题①：同一个用户连点两次"预订"</h3>
+  <p>网络一卡，用户双击"完成预订"，可能就下了两单。前端在点击后禁用按钮？不够——用户关掉 JavaScript，按钮照样能再点。正解是<b>幂等 API</b>：填完信息先全局唯一生成一个预订订单 ID（<code>reservationID</code>），提交时带上；第二次点击发出的是同一个 ID，后端一查就认出是重复预订。最后一道保险：<code>reservationID</code> 列加<b>唯一约束（Unique Constraint）</b>，数据库层面直接拒绝第二条同 ID 记录落库。幂等的意思：同一个操作调用多少次，效果都等于执行一次。</p>
+
+  <h3><span class="no">3</span>并发问题②：两个人抢最后一间房</h3>
+  <p>更难的问题：用户 1 和用户 2 同时订同一间房。在<strong>非串行化</strong>的隔离级别下，两个事务各自检查库存——都看见 100 间房里 <code>total_reserved</code> 是 99，都通过；事务 2 先扣库存提交，事务 1 看到的还是 99，也扣也提交。<b>两个事务都成功了，房间卖出去两间，这就是超卖。</b></p>
+  <p>原文的预订逻辑分两步：第一步 <code>SELECT</code> 查出范围内的每一天，任何一天不满足 <code>total_reserved + n &gt; 110% × total_inventory</code> 就回滚；第二步 <code>UPDATE room_type_inventory SET total_reserved = total_reserved + n</code>，然后提交。问题就出在两步之间没有护栏。三条护栏：悲观锁、乐观锁、数据库约束。</p>
+
+  <h3><span class="no">4</span>方案一：悲观锁（Pessimistic Locking）</h3>
+  <p>思路：改记录之前先锁死，别人排队等。MySQL 里用 <code>SELECT ... FOR UPDATE</code>，锁住选中的行直到事务提交。优点：防止应用程序更新正在被修改的数据；容易实现；数据争用严重时有效。缺点也硬：多个资源同时锁可能<b>死锁</b>；某个事务锁太久，其他所有排队的事务全被拖住；查询命中的行越多、事务越长，杀伤力越大。<b>作者因为可扩展性问题，不推荐这条路。</b></p>
+
+  <h3><span class="no">5</span>方案二：乐观锁（Optimistic Locking）</h3>
+  <p>思路：赌冲突很少，不锁，事后校验。表里加一个 <code>version</code> 列：读出行时记下版本号；更新时版本号加 1 一起写回；若库里的版本已经不是刚才那个，说明有人抢先改过，这次更新被拒绝，业务层重试。推荐用版本号而不是时间戳——<b>服务器时钟可能不准</b>。优点：不在数据库里拿锁；防止编辑过期数据；争用低时是首选。缺点：并发一高，大量更新失败回滚，性能反而掉。本系统平均预订 TPS 只有 3，<b>乐观锁正是作者眼里的好选择</b>。</p>
+
+  <h3><span class="no">6</span>方案三：数据库约束（Database Constraint）</h3>
+  <p>思路和乐观锁相近，但护栏下沉到数据库：<code>CONSTRAINT check_room_count CHECK((total_inventory - total_reserved) &gt;= 0)</code>——库存减成负数的事务直接判违例。优点：实现简单；争用小时效果很好。缺点：争用高时同样大量失败；约束不像应用代码那样容易做版本管理；不是所有数据库都支持。因为足够简单，这也是酒店预订系统的另一个好选择。</p>
+
+  <h3><span class="no">7</span>可扩展性：如果 QPS 大 1000 倍</h3>
+  <p>面试官的追问：这套系统如果被 booking.com 那种量级使用怎么办？QPS 可能大 1000 倍。先看瓶颈在哪：所有服务都是<b>无状态</b>的，复制就能扩；难的是有状态的数据库。一条路是<b>分片（Sharding）</b>：按 <code>hotel_id</code> 切（所有查询都按它过滤），QPS 30,000 分到 16 个分片，每片 1875 QPS，在 MySQL 集群的承受范围内。</p>
+  <p>另一条路是<b>缓存</b>：用 Redis 缓存客房库存和预订。key 形如 <code>hotelID_roomTypeID_{date}</code>，value 是该日可用房数；设 TTL，过期日期的数据自动清掉。缓存和数据库之间靠 <b>CDC（Change Data Capture，变更数据捕获）</b>异步同步——Debezium 是常用的选择，它把数据库的变更读出来流进 Redis。代价是缓存和库之间总有不一致窗口：页面显示"还有房"、下单却被数据库拦下，用户得刷新。作者认为可接受——数据库是最后防线，总会挡住无效预订；何况就算没有缓存，犹豫太久的人也会撞上房刚被订走的现实。</p>
+
+  <h3><span class="no">8</span>服务间的数据一致性：别把账本拆开</h3>
+  <p>单体应用用共享关系库，靠数据库事务，"扣库存 + 写订单"天然原子。本设计选了混合方案：预订和库存 API 由<b>同一个服务</b>处理，共用关系库，继续吃 ACID 的红利。面试官可能质疑：纯微服务里每个服务该有自己的数据库。那样的话，跨服务的操作就没法原子了。两条名路：<b>两阶段提交（Two-phase commit, 2PC）</b>——跨节点原子提交的协议，但性能差，单个节点延迟会阻塞所有节点；<b>Saga</b>——一串本地事务，任何一步失败就触发补偿事务（回滚动作），走最终一致。跨服务一致性是真难题，会显著抬高系统复杂度——所以值得掂量：为"纯"微服务付这个成本，值不值？</p>
+</section>
+
+<section id="s4">
+  <h2>权衡与坑</h2>
+  <div class="warn"><b>这一讲的真话：</b>
+    <ul class="clean">
+      <li>悲观锁可能死锁，锁久了拖垮所有排队的事务——作者明确不推荐，别在抢房这种高争用场景用它。</li>
+      <li>乐观锁和数据库约束在并发飙高时会大量回滚，性能反而更差；"防超卖"和"高吞吐"在这里是打架的。</li>
+      <li>允许超售 10% 的前提是"预计会有人取消"；真到了没人取消的旺季，就得有人到店无房——业务上必须有兜底流程。</li>
+      <li>Redis 缓存和数据库之间天然有不一致窗口，页面可能显示有房却订不上。好在数据库会拦下无效预订，错的不入账，只是体验打折。</li>
+      <li>纯微服务每个服务一个库，一致性立刻变难：2PC 阻塞、Saga 复杂。把预订和库存塞进同一个库，是有意识的务实妥协。</li>
+      <li>7300 万行的库存表看着吓人，其实单库就能扛；别为不存在的瓶颈提前分片。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="keys"><span class="kt">记住 3 点</span>
+    <ul>
+      <li>订房系统的核心不是 QPS，是<b>并发正确性</b>：最后一间房只能归一个人。</li>
+      <li>库存按（酒店， 房型， 天）记账；超售就是一行算术：<code>total_reserved + n ≤ 110% × total_inventory</code>。</li>
+      <li>防重复下单靠幂等键 + 唯一约束；防超卖靠乐观锁或数据库约束；跨服务的账本别轻易拆，Saga 是最后的招。</li>
+    </ul>
+  </div>
+  <p class="rel">原文：<a href="../22.%20Hotel%20Reservation%20System/README.zh-CN.md">22. Hotel Reservation System/README.zh-CN.md</a></p>
+</section>
+
+</main>
+
+<nav class="pager">
+  <a href="21.html"><span>上一讲</span>21 ←</a>
+  <a class="next" href="23.html"><span>下一讲</span>23 →</a>
+</nav>
+
+<footer class="end">深入浅出28讲 · 根据本仓库 28 章中文笔记改写<br>读完了？回到目录挑下一讲，或对照原文查漏补缺</footer>
+</div>
+
+<script>
+window.addEventListener('scroll',function(){
+  var h=document.documentElement;var p=h.scrollTop/(h.scrollHeight-h.clientHeight)*100;
+  document.getElementById('progress').style.width=(p||0)+'%';
+});
+</script>
+</body>
+</html>
