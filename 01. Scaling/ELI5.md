@@ -6,6 +6,10 @@
 
 一个应用刚上线时，网页服务和数据库放在一台机器上很简单；用户变多后，CPU、内存、网络或数据库先后成为瓶颈。
 
+![跟着测出的瓶颈逐步扩展](../diagrams/scale-with-measurement.png)
+
+图源：[可编辑 Excalidraw 文件](../diagrams/scale-with-measurement.excalidraw)
+
 ## 为什么需要它
 
 把 Web 服务与数据库分开，可以分别扩容；多台无状态 Web 服务器前放负载均衡器，可以把请求分开并在故障时绕开坏机器。读多写少时，数据库副本能分担读取。

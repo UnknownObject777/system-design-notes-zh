@@ -6,6 +6,10 @@
 
 用户点击支付后可能超时，但银行或支付渠道其实已扣款；再次提交可能导致重复扣钱。
 
+![用幂等、回调和对账确认支付状态](../diagrams/payment-idempotency-and-reconciliation.png)
+
+图源：[可编辑 Excalidraw 文件](../diagrams/payment-idempotency-and-reconciliation.excalidraw)
+
 ## 为什么需要它
 
 支付需要可靠状态流转、重复请求保护、账务记录和对账，不能只看一次 HTTP 返回值。
